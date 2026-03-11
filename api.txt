@@ -1,0 +1,17 @@
+Axios API Configuration
+=======================
+
+Base URL: http://localhost:8000
+
+All API requests in this frontend use a centralized Axios instance
+defined in app/api.ts with:
+
+  baseURL: 'http://localhost:8000/api'
+  headers: { 'Content-Type': 'application/json' }
+
+This ensures all requests automatically prefix the Django backend URL.
+
+Usage:
+  import api from './api';
+  const res = await api.get('/channels/');
+  const res = await api.post('/auth/send-code/', { phone_number: '...' });
