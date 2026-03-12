@@ -51,6 +51,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
     const [updating, setUpdating] = useState(false);
     const [redoError, setRedoError] = useState<string | null>(null);
     const [aiRedoChooser, setAiRedoChooser] = useState<TransactionResult | null>(null);
+    const [takeAiResult, setTakeAiResult] = useState(false);
 
     const handleRedoOcr = async (result: TransactionResult) => {
         const key = `ocr-${result.id}`;
@@ -175,7 +176,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 base['Date'] = getSyncedValue(r.ocr_date, r.ai_date);
                 base['Sender'] = getSyncedValue(r.ocr_sender, r.ai_from_name);
                 base['Receiver'] = getSyncedValue(r.ocr_receiver, r.ai_to_name);
-                base['Amount'] = r.needs_attention
+                base['Amount'] = r.needs_attention && !takeAiResult
                     ? `Mismatch (OCR: ${r.ocr_amount || 'None'} / AI: ${r.ai_amount || 'None'})`
                     : (r.ai_amount || r.ocr_amount || '');
             }
@@ -211,7 +212,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             rows += '<tr>';
             rows += `<td>${idx + 1}</td><td>${r.image_name}</td>`;
             if (showSynced) {
-                const amountText = r.needs_attention ? '⚠️ Mismatch' : (r.ai_amount || r.ocr_amount || '');
+                const amountText = r.needs_attention && !takeAiResult ? '⚠️ Mismatch' : (r.ai_amount || r.ocr_amount || '');
                 rows += `<td>${getSyncedBank(r.ocr_bank_name, r.ai_bank_name)}</td>
                          <td>${getSyncedValue(r.ocr_transaction_id, r.ai_reference_number)}</td>
                          <td>${getSyncedValue(r.ocr_date, r.ai_date)}</td>
@@ -277,7 +278,18 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 >
                     🔮 Synced
                 </button>
-                <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    {viewMode === 'synced' && (
+                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '6px', marginRight: '8px', background: '#f3f4f6', padding: '4px 10px', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
+                            <input
+                                type="checkbox"
+                                checked={takeAiResult}
+                                onChange={(e) => setTakeAiResult(e.target.checked)}
+                                style={{ accentColor: '#7c3aed' }}
+                            />
+                            🤖 Take AI Result
+                        </label>
+                    )}
                     <button
                         className="btn btn-sm"
                         onClick={exportToExcel}
@@ -493,8 +505,8 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                                         <td>{getSyncedValue(result.ocr_date, result.ai_date)}</td>
                                         <td>{getSyncedValue(result.ocr_sender, result.ai_from_name)}</td>
                                         <td>{getSyncedValue(result.ocr_receiver, result.ai_to_name)}</td>
-                                        <td className={`amount-cell ${result.needs_attention ? 'amount-mismatch' : ''}`} style={{ minWidth: '160px' }}>
-                                            {result.needs_attention ? (
+                                        <td className={`amount-cell ${result.needs_attention && !takeAiResult ? 'amount-mismatch' : ''}`} style={{ minWidth: '160px' }}>
+                                            {result.needs_attention && !takeAiResult ? (
                                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', padding: '6px', borderRadius: '6px', alignItems: 'center' }}>
                                                     <strong style={{ fontSize: '11px', color: '#dc2626', textTransform: 'uppercase' }}>⚠️ Needs Resolution</strong>
                                                     <div style={{ fontSize: '11px', lineHeight: '1.4' }}>
