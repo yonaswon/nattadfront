@@ -43,6 +43,30 @@ export default function ImageViewer({ result, onClose, onSave }: ImageViewerProp
     const handleZoomIn = () => setZoom(prev => Math.min(prev + 0.25, 6));
     const handleZoomOut = () => setZoom(prev => Math.max(prev - 0.25, 0.5));
 
+    const transferAiToOcr = () => {
+        setForm(prev => ({
+            ...prev,
+            ocr_bank_name: prev.ai_bank_name || '',
+            ocr_transaction_id: prev.ai_reference_number || '',
+            ocr_date: prev.ai_date || '',
+            ocr_sender: prev.ai_from_name || '',
+            ocr_receiver: prev.ai_to_name || '',
+            ocr_amount: prev.ai_amount || '',
+        }));
+    };
+
+    const transferOcrToAi = () => {
+        setForm(prev => ({
+            ...prev,
+            ai_bank_name: prev.ocr_bank_name || '',
+            ai_reference_number: prev.ocr_transaction_id || '',
+            ai_date: prev.ocr_date || '',
+            ai_from_name: prev.ocr_sender || '',
+            ai_to_name: prev.ocr_receiver || '',
+            ai_amount: prev.ocr_amount || '',
+        }));
+    };
+
     const handleSave = async () => {
         setSaving(true);
         try {
@@ -176,6 +200,27 @@ export default function ImageViewer({ result, onClose, onSave }: ImageViewerProp
                                     )}
                                 </div>
                             </div>
+
+                            {editMode && (
+                                <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', gap: '16px', padding: '10px' }}>
+                                    <button
+                                        type="button"
+                                        onClick={transferAiToOcr}
+                                        style={{ background: '#e0e7ff', color: '#4338ca', border: '1px solid #c7d2fe', borderRadius: '50%', width: '40px', height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', fontSize: '18px' }}
+                                        title="Copy AI to OCR"
+                                    >
+                                        ⬅️
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={transferOcrToAi}
+                                        style={{ background: '#fae8ff', color: '#a21caf', border: '1px solid #f5d0fe', borderRadius: '50%', width: '40px', height: '40px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', fontSize: '18px' }}
+                                        title="Copy OCR to AI"
+                                    >
+                                        ➡️
+                                    </button>
+                                </div>
+                            )}
 
                             <div className="data-card ai-card">
                                 <h4>🤖 AI Result {result.ai_model_used && `(${result.ai_model_used})`}</h4>
