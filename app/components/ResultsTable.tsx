@@ -254,8 +254,15 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const formatAmountForExcel = (val: string | number | null | undefined): number => {
             if (val === null || val === undefined) return 0;
             if (typeof val === 'number') return val;
-            const num = parseFloat(val.toString().replace(/,/g, '').trim());
-            return isNaN(num) ? 0 : num;
+
+            const strVal = val.toString().trim();
+            // Match optional minus, followed by digits/commas, optionally followed by a decimal point and digits
+            const match = strVal.match(/-?[\d,]+(\.\d+)?/);
+            if (match) {
+                const num = parseFloat(match[0].replace(/,/g, ''));
+                return isNaN(num) ? 0 : num;
+            }
+            return 0;
         };
 
         const rows = processedResults.map((r, idx) => {
