@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, Fragment } from 'react';
+import { useState, useMemo, Fragment } from 'react';
 import api from '../api';
 import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
@@ -52,6 +52,117 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
     const [redoError, setRedoError] = useState<string | null>(null);
     const [aiRedoChooser, setAiRedoChooser] = useState<TransactionResult | null>(null);
     const [takeAiResult, setTakeAiResult] = useState(false);
+    const [applyDateFix, setApplyDateFix] = useState(false);
+
+    // Helper for "synced" view mode to merge text values
+    const getSyncedValue = (ocrVal: string | null | undefined, aiVal: string | null | undefined): string => {
+        const ocrStr = (ocrVal || '').trim();
+        const aiStr = (aiVal || '').trim();
+
+        if (!ocrStr && !aiStr) return '—';
+        if (!ocrStr) return aiStr;
+        if (!aiStr) return ocrStr;
+        if (ocrStr.toLowerCase() === aiStr.toLowerCase()) return aiStr;
+        return aiStr;
+    };
+
+    const processedResults = useMemo(() => {
+        if (!applyDateFix || results.length === 0) return results;
+
+        const fixed = results.map(r => ({ ...r }));
+
+        const parseDate = (d: string) => {
+            const parts = d.split(/[-/]/);
+            if (parts.length < 3) return null;
+            const ds = parseInt(parts[0], 10);
+            const ms = parseInt(parts[1], 10);
+            const ys = parseInt(parts[2], 10);
+            if (isNaN(ds) || isNaN(ms) || isNaN(ys)) return null;
+            return { d: ds, m: ms, y: ys > 100 ? ys : ys + 2000, delim: d.includes('-') ? '-' : '/' };
+        };
+
+        const dateToValue = (y: number, m: number, d: number) => {
+            if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+            return new Date(y, m - 1, d).getTime();
+        };
+
+        const yearCounts: Record<number, number> = {};
+        fixed.slice(0, 20).forEach(r => {
+            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
+            const p = parseDate(dateStr);
+            if (p && p.y > 2000 && p.y < 2100) {
+                yearCounts[p.y] = (yearCounts[p.y] || 0) + 1;
+            }
+        });
+
+        let majorityYear = new Date().getFullYear();
+        let maxCount = 0;
+        for (const [y, count] of Object.entries(yearCounts)) {
+            if (count > maxCount) {
+                maxCount = count;
+                majorityYear = parseInt(y, 10);
+            }
+        }
+
+        let currentRef = { d: 31, m: 12, y: majorityYear };
+        for (const r of fixed) {
+            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
+            if (p) {
+                const isSwapped = p.d <= 12 && p.m > 12;
+                currentRef = { d: isSwapped ? p.m : p.d, m: isSwapped ? p.d : p.m, y: majorityYear };
+                break;
+            }
+        }
+
+        for (let i = 0; i < fixed.length; i++) {
+            const r = fixed[i];
+            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
+            if (!dateStr || dateStr === '—') continue;
+
+            const parsed = parseDate(dateStr);
+            if (!parsed) continue;
+
+            let { d, m, y, delim } = parsed;
+            let modified = false;
+
+            if (Math.abs(y - currentRef.y) > 1) {
+                y = currentRef.y;
+                modified = true;
+            }
+
+            const val1 = dateToValue(y, m, d);
+            const val2 = dateToValue(y, d, m);
+            const refVal = dateToValue(currentRef.y, currentRef.m, currentRef.d) || 0;
+
+            if (val1 && val2) {
+                const diff1 = val1 - refVal;
+                const diff2 = val2 - refVal;
+
+                if (diff1 > 0 && diff2 <= 0) {
+                    const temp = m; m = d; d = temp;
+                    modified = true;
+                } else if (diff1 > 0 && diff2 > 0) {
+                    if (diff2 < diff1) {
+                        const temp = m; m = d; d = temp;
+                        modified = true;
+                    }
+                }
+            } else if (!val1 && val2) {
+                const temp = m; m = d; d = temp;
+                modified = true;
+            }
+
+            if (modified) {
+                const newStr = `${d.toString().padStart(2, '0')}${delim}${m.toString().padStart(2, '0')}${delim}${y}`;
+                if (r.ai_date) r.ai_date = newStr;
+                if (r.ocr_date) r.ocr_date = newStr;
+            }
+
+            currentRef = { d, m, y };
+        }
+
+        return fixed;
+    }, [results, applyDateFix]);
 
     const handleRedoOcr = async (result: TransactionResult) => {
         const key = `ocr-${result.id}`;
@@ -100,18 +211,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         }
     };
 
-    // Helper for "synced" view mode to merge text values
-    const getSyncedValue = (ocrVal: string | null | undefined, aiVal: string | null | undefined): string => {
-        const ocrStr = (ocrVal || '').trim();
-        const aiStr = (aiVal || '').trim();
-
-        if (!ocrStr && !aiStr) return '—';
-        if (!ocrStr) return aiStr;
-        if (!aiStr) return ocrStr;
-        if (ocrStr.toLowerCase() === aiStr.toLowerCase()) return aiStr;
-        // If they conflict, prioritize AI explicitly
-        return aiStr;
-    };
+    // Other helpers
 
     // Special helper for Bank Name to prefer a named bank over "Other"
     const getSyncedBank = (ocrVal: string | null | undefined, aiVal: string | null | undefined): string => {
@@ -151,7 +251,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
     };
 
     const exportToExcel = () => {
-        const rows = results.map((r, idx) => {
+        const rows = processedResults.map((r, idx) => {
             const base: Record<string, any> = { '#': idx + 1, 'Image': r.image_name, 'Status': r.status };
             if (viewMode === 'all' || viewMode === 'ocr') {
                 base['OCR Bank'] = r.ocr_bank_name || '';
@@ -208,7 +308,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         headers += '<th>Status</th>';
 
         let rows = '';
-        results.forEach((r, idx) => {
+        processedResults.forEach((r, idx) => {
             rows += '<tr>';
             rows += `<td>${idx + 1}</td><td>${r.image_name}</td>`;
             if (showSynced) {
@@ -243,7 +343,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             @media print { body { margin: 0; } }
         </style></head><body>
         <h1>📊 Analysis Results — ${viewMode.toUpperCase()}</h1>
-        <p>${results.length} transactions • Exported ${new Date().toLocaleString()}</p>
+        <p>${processedResults.length} transactions • Exported ${new Date().toLocaleString()}</p>
         <table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>
         </body></html>`;
 
@@ -280,15 +380,26 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 </button>
                 <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px', alignItems: 'center' }}>
                     {viewMode === 'synced' && (
-                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '6px', marginRight: '8px', background: '#f3f4f6', padding: '4px 10px', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
-                            <input
-                                type="checkbox"
-                                checked={takeAiResult}
-                                onChange={(e) => setTakeAiResult(e.target.checked)}
-                                style={{ accentColor: '#7c3aed' }}
-                            />
-                            🤖 Take AI Result
-                        </label>
+                        <>
+                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '6px', marginRight: '8px', background: '#f3f4f6', padding: '4px 10px', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={applyDateFix}
+                                    onChange={(e) => setApplyDateFix(e.target.checked)}
+                                    style={{ accentColor: '#10b981' }}
+                                />
+                                📅 Apply Date Fix
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '6px', marginRight: '8px', background: '#f3f4f6', padding: '4px 10px', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={takeAiResult}
+                                    onChange={(e) => setTakeAiResult(e.target.checked)}
+                                    style={{ accentColor: '#7c3aed' }}
+                                />
+                                🤖 Take AI Result
+                            </label>
+                        </>
                     )}
                     <button
                         className="btn btn-sm"
@@ -326,7 +437,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                     </tr>
                 </thead>
                 <tbody>
-                    {results.map((result, idx) => {
+                    {processedResults.map((result, idx) => {
                         const showOcr = viewMode === 'all' || viewMode === 'ocr';
                         const showAi = viewMode === 'all' || viewMode === 'ai';
                         const rowSpan = (showOcr && showAi) ? 2 : 1;
@@ -556,7 +667,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 </tbody>
             </table>
             {
-                results.length === 0 && (
+                processedResults.length === 0 && (
                     <div className="empty-state">
                         <p>No results yet. Start an analysis to see transaction data here.</p>
                     </div>
