@@ -58,6 +58,11 @@ function ResultsContent() {
     const [selectedResult, setSelectedResult] = useState<TransactionResult | null>(null);
     const [showReconcile, setShowReconcile] = useState(false);
 
+    const [offset, setOffset] = useState(0);
+    const [hasMore, setHasMore] = useState(false);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const LIMIT = 500;
+
     const fetchSessions = async () => {
         try {
             const res = await api.get('/sessions/');
@@ -67,26 +72,46 @@ function ResultsContent() {
         }
     };
 
-    const fetchResults = useCallback(async () => {
-        setLoading(true);
+    const fetchResults = async (isLoadMore = false, currentOffset = 0) => {
+        if (!isLoadMore) setLoading(true);
+        else setLoadingMore(true);
+
         try {
-            const params: Record<string, string> = {};
-            // We fetch ALL results and do "needs_attention" filtering dynamically on the frontend
-            // so that considerCents toggle works without refetching.
+            const params: Record<string, string | number> = {
+                limit: LIMIT,
+                offset: currentOffset
+            };
+
             if (filterSessionId !== 'all') params.session_id = filterSessionId;
             const res = await api.get('/results/', { params });
-            setResults(res.data);
+
+            const newResults = res.data.results || res.data;
+            const totalCount = res.data.count || newResults.length;
+
+            if (isLoadMore) {
+                setResults(prev => [...prev, ...newResults]);
+            } else {
+                setResults(newResults);
+            }
+
+            setHasMore(totalCount > currentOffset + LIMIT);
+            setOffset(currentOffset + LIMIT);
         } catch (err) {
             console.error('Failed to fetch results:', err);
         } finally {
-            setLoading(false);
+            if (!isLoadMore) setLoading(false);
+            else setLoadingMore(false);
         }
-    }, [filter, filterSessionId]);
+    };
 
     useEffect(() => {
         fetchSessions();
-        fetchResults();
-    }, [fetchResults]);
+    }, []);
+
+    useEffect(() => {
+        fetchResults(false, 0);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [filterSessionId]);
 
     const handleSaveResult = (updated: TransactionResult) => {
         setResults(prev => prev.map(r => r.id === updated.id ? updated : r));
@@ -202,7 +227,7 @@ function ResultsContent() {
                         >
                             ⚠️ Need Attention ({processedResults.filter(r => r.needs_attention).length})
                         </button>
-                        <button className="btn btn-sm" onClick={fetchResults}>
+                        <button className="btn btn-sm" onClick={() => fetchResults(false, 0)}>
                             🔄 Refresh
                         </button>
                     </div>
@@ -225,6 +250,19 @@ function ResultsContent() {
                 onEditResult={setSelectedResult}
                 onResultUpdated={(updated) => setResults(prev => prev.map(r => r.id === updated.id ? updated : r))}
             />
+
+            {hasMore && (
+                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '20px', marginBottom: '40px' }}>
+                    <button
+                        className="btn"
+                        onClick={() => fetchResults(true, offset)}
+                        disabled={loadingMore}
+                        style={{ background: '#4bcffa', color: '#1e272e', fontWeight: 'bold', padding: '10px 24px', borderRadius: '8px', border: 'none' }}
+                    >
+                        {loadingMore ? '🔄 Loading...' : '⬇️ Load More Results'}
+                    </button>
+                </div>
+            )}
 
             {selectedResult && (
                 <ImageViewer
