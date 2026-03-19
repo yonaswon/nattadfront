@@ -251,6 +251,13 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
     };
 
     const exportToExcel = () => {
+        const formatAmountForExcel = (val: string | number | null | undefined): number => {
+            if (val === null || val === undefined) return 0;
+            if (typeof val === 'number') return val;
+            const num = parseFloat(val.toString().replace(/,/g, '').trim());
+            return isNaN(num) ? 0 : num;
+        };
+
         const rows = processedResults.map((r, idx) => {
             const base: Record<string, any> = { '#': idx + 1, 'Image': r.image_name, 'Status': r.status };
             if (viewMode === 'all' || viewMode === 'ocr') {
@@ -259,7 +266,10 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 base['OCR Date'] = r.ocr_date || '';
                 base['OCR Sender'] = r.ocr_sender || '';
                 base['OCR Receiver'] = r.ocr_receiver || '';
-                base['OCR Amount'] = r.ocr_amount ? parseFloat(r.ocr_amount) : '';
+                base['OCR Amount'] = formatAmountForExcel(r.ocr_amount);
+                if (r.ocr_total_amount) {
+                    base['OCR Total Amount'] = formatAmountForExcel(r.ocr_total_amount);
+                }
             }
             if (viewMode === 'all' || viewMode === 'ai') {
                 base['AI Bank'] = r.ai_bank_name || '';
@@ -267,7 +277,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 base['AI Date'] = r.ai_date || '';
                 base['AI Sender'] = r.ai_from_name || '';
                 base['AI Receiver'] = r.ai_to_name || '';
-                base['AI Amount'] = r.ai_amount ? parseFloat(r.ai_amount) : '';
+                base['AI Amount'] = formatAmountForExcel(r.ai_amount);
                 base['AI Model'] = r.ai_model_used || '';
             }
             if (viewMode === 'synced') {
@@ -276,14 +286,35 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 base['Date'] = getSyncedValue(r.ocr_date, r.ai_date);
                 base['Sender'] = getSyncedValue(r.ocr_sender, r.ai_from_name);
                 base['Receiver'] = getSyncedValue(r.ocr_receiver, r.ai_to_name);
-                base['Amount'] = r.needs_attention && !takeAiResult
+
+                const rawAmount = r.needs_attention && !takeAiResult
                     ? `Mismatch (OCR: ${r.ocr_amount || 'None'} / AI: ${r.ai_amount || 'None'})`
                     : (r.ai_amount || r.ocr_amount || '');
+                base['Amount'] = formatAmountForExcel(rawAmount);
             }
             base['Needs Attention'] = r.needs_attention ? 'Yes' : 'No';
             return base;
         });
+
         const ws = XLSX.utils.json_to_sheet(rows);
+
+        // Apply number formatting to amount columns
+        const range = XLSX.utils.decode_range(ws['!ref'] || '');
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+            const address = XLSX.utils.encode_col(C) + '1';
+            if (!ws[address]) continue;
+            const headerName = ws[address].v;
+            if (['OCR Amount', 'OCR Total Amount', 'AI Amount', 'Amount'].includes(headerName)) {
+                for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+                    const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+                    if (ws[cellAddress]) {
+                        ws[cellAddress].t = 'n';
+                        ws[cellAddress].z = '#,##0.00';
+                    }
+                }
+            }
+        }
+
         // Auto-size columns
         const colWidths = Object.keys(rows[0] || {}).map(key => ({ wch: Math.max(key.length + 2, 15) }));
         ws['!cols'] = colWidths;
