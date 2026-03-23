@@ -296,34 +296,45 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             }
         }
 
-        // ── Pass 6: Fill empty dates from nearest neighbors ──
+        // ── Pass 6: Fill empty dates from nearest neighbors (Majority Vote) ──
         for (let i = 0; i < fixed.length; i++) {
             const dateStr = getRawDate(fixed[i]);
             if (dateStr && dateStr !== '—') continue;
 
-            let aboveRes: Resolved | null = null;
-            let belowRes: Resolved | null = null;
-            for (let j = i - 1; j >= 0; j--) { if (resolved[j]) { aboveRes = resolved[j]; break; } }
-            for (let j = i + 1; j < fixed.length; j++) { if (resolved[j]) { belowRes = resolved[j]; break; } }
-
-            let filledDate: Date | null = null;
-            let usedDelim = '/';
-
-            if (aboveRes && belowRes) {
-                filledDate = new Date((aboveRes.ts + belowRes.ts) / 2);
-                usedDelim = aboveRes.delim;
-            } else if (aboveRes) {
-                filledDate = new Date(aboveRes.ts);
-                usedDelim = aboveRes.delim;
-            } else if (belowRes) {
-                filledDate = new Date(belowRes.ts);
-                usedDelim = belowRes.delim;
+            const neighbors: Resolved[] = [];
+            for (let j = i - 1; j >= 0 && neighbors.length < 5; j--) {
+                if (resolved[j]) neighbors.push(resolved[j]!);
+            }
+            let countBelow = 0;
+            for (let j = i + 1; j < fixed.length && countBelow < 5; j++) {
+                if (resolved[j]) { neighbors.push(resolved[j]!); countBelow++; }
             }
 
-            if (filledDate) {
-                const filled = formatDate(filledDate.getDate(), filledDate.getMonth() + 1, filledDate.getFullYear(), usedDelim);
-                fixed[i].ocr_date = filled;
-                fixed[i].ai_date = filled;
+            if (neighbors.length === 0) continue;
+
+            const counts: Record<number, { count: number; res: Resolved }> = {};
+            for (const n of neighbors) {
+                if (!counts[n.ts]) counts[n.ts] = { count: 0, res: n };
+                counts[n.ts].count++;
+            }
+
+            let bestTs = neighbors[0].ts;
+            let maxCount = 0;
+            for (const [tsStr, data] of Object.entries(counts)) {
+                if (data.count > maxCount) {
+                    maxCount = data.count;
+                    bestTs = parseInt(tsStr, 10);
+                }
+            }
+
+            const bestRes = counts[bestTs].res;
+            const filled = formatDate(bestRes.day, bestRes.month, bestRes.year, bestRes.delim);
+            if (useAiDate) {
+                if (fixed[i].ai_date !== undefined) fixed[i].ai_date = filled;
+                else fixed[i].ocr_date = filled;
+            } else {
+                if (fixed[i].ocr_date !== undefined) fixed[i].ocr_date = filled;
+                else fixed[i].ai_date = filled;
             }
         }
 
