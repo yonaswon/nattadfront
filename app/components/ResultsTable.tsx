@@ -182,26 +182,27 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
 
             if (ts1 !== null && ts2 !== null && allAnchors.length > 0) {
                 let score1 = 0, score2 = 0;
+                const PENALTY = 365 * 24 * 60 * 60 * 1000; // 1 year penalty for breaking sort order
 
                 if (anchorsAbove.length > 0) {
                     const nearestAbove = anchorsAbove[0];
                     if (isDescending) {
-                        if (ts1 > nearestAbove.ts) score1 += 100;
-                        if (ts2 > nearestAbove.ts) score2 += 100;
+                        if (ts1 > nearestAbove.ts) score1 += PENALTY;
+                        if (ts2 > nearestAbove.ts) score2 += PENALTY;
                     } else {
-                        if (ts1 < nearestAbove.ts) score1 += 100;
-                        if (ts2 < nearestAbove.ts) score2 += 100;
+                        if (ts1 < nearestAbove.ts) score1 += PENALTY;
+                        if (ts2 < nearestAbove.ts) score2 += PENALTY;
                     }
                 }
 
                 if (anchorsBelow.length > 0) {
                     const nearestBelow = anchorsBelow[0];
                     if (isDescending) {
-                        if (ts1 < nearestBelow.ts) score1 += 100;
-                        if (ts2 < nearestBelow.ts) score2 += 100;
+                        if (ts1 < nearestBelow.ts) score1 += PENALTY;
+                        if (ts2 < nearestBelow.ts) score2 += PENALTY;
                     } else {
-                        if (ts1 > nearestBelow.ts) score1 += 100;
-                        if (ts2 > nearestBelow.ts) score2 += 100;
+                        if (ts1 > nearestBelow.ts) score1 += PENALTY;
+                        if (ts2 > nearestBelow.ts) score2 += PENALTY;
                     }
                 }
 
