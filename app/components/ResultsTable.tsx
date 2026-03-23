@@ -2,7 +2,7 @@
 
 import { useState, useMemo, Fragment } from 'react';
 import api from '../api';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import { saveAs } from 'file-saver';
 
 interface TransactionResult {
@@ -317,7 +317,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         };
 
         const rows = processedResults.map((r, idx) => {
-            const base: Record<string, any> = { '#': idx + 1, 'Image': r.image_name, 'Status': r.status };
+            const base: Record<string, any> = { '#': idx + 1 };
             if (viewMode === 'all' || viewMode === 'ocr') {
                 base['OCR Bank'] = r.ocr_bank_name || '';
                 base['OCR Ref ID'] = r.ocr_transaction_id || '';
@@ -350,7 +350,6 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                     : (r.ai_amount || r.ocr_amount || '');
                 base['Amount'] = formatAmountForExcel(rawAmount);
             }
-            base['Needs Attention'] = r.needs_attention ? 'Yes' : 'No';
             return base;
         });
 
@@ -478,8 +477,60 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
 
         const ws = XLSX.utils.json_to_sheet(excelRows);
 
-        // Apply number formatting to Amount column and style header/total rows
+        // Track which rows are month headers, data rows, and total rows for styling
         const range = XLSX.utils.decode_range(ws['!ref'] || '');
+        const numCols = range.e.c + 1;
+
+        // Build a map of row types
+        let currentRowIdx = 1; // row 0 is the sheet header
+        let monthIndex = 0;
+        for (const group of groups) {
+            const headerRowIdx = currentRowIdx; // month header
+            const dataStart = currentRowIdx + 1;
+            const dataEnd = dataStart + group.rows.length - 1;
+            const totalRowIdx = dataEnd + 1;
+            const separatorRowIdx = totalRowIdx + 1;
+
+            const isGray = monthIndex % 2 === 1;
+            const fillColor = isGray ? 'E8E8E8' : 'FFFFFF';
+
+            // Style month header row - bold, slightly darker background
+            for (let C = 0; C < numCols; C++) {
+                const addr = XLSX.utils.encode_cell({ r: headerRowIdx, c: C });
+                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                ws[addr].s = {
+                    font: { bold: true, sz: 13 },
+                    fill: { fgColor: { rgb: isGray ? 'D0D0D0' : 'E2E8F0' } },
+                    alignment: { horizontal: 'left' }
+                };
+            }
+
+            // Style data rows with alternating fill
+            for (let R = dataStart; R <= dataEnd; R++) {
+                for (let C = 0; C < numCols; C++) {
+                    const addr = XLSX.utils.encode_cell({ r: R, c: C });
+                    if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                    ws[addr].s = {
+                        fill: { fgColor: { rgb: fillColor } },
+                    };
+                }
+            }
+
+            // Style total row - bold
+            for (let C = 0; C < numCols; C++) {
+                const addr = XLSX.utils.encode_cell({ r: totalRowIdx, c: C });
+                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                ws[addr].s = {
+                    font: { bold: true, sz: 12 },
+                    fill: { fgColor: { rgb: isGray ? 'D0D0D0' : 'E2E8F0' } },
+                };
+            }
+
+            currentRowIdx = separatorRowIdx + 1;
+            monthIndex++;
+        }
+
+        // Apply number formatting to Amount column
         for (let C = range.s.c; C <= range.e.c; ++C) {
             const headerAddr = XLSX.utils.encode_col(C) + '1';
             if (!ws[headerAddr]) continue;
@@ -489,6 +540,8 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                     if (ws[cellAddr] && typeof ws[cellAddr].v === 'number') {
                         ws[cellAddr].t = 'n';
                         ws[cellAddr].z = '#,##0.00';
+                        // preserve existing style
+                        ws[cellAddr].s = { ...ws[cellAddr].s, numFmt: '#,##0.00' };
                     }
                 }
             }
