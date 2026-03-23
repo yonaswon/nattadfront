@@ -541,6 +541,21 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             groupMap.get(groupKey)!.push({ idx: i, r: processedResults[i], displayDate: dateStr });
         }
 
+        // Sort groupOrder descending (YYYY-MM string comparison works natively)
+        groupOrder.sort((a, b) => b.localeCompare(a));
+
+        // Sort items inside each group by exact Date descending
+        for (const key of groupOrder) {
+            groupMap.get(key)!.sort((a, b) => {
+                const padDate = (d: string) => {
+                    const p = d.split(/[-/]/);
+                    if (p.length < 3) return d;
+                    return `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}`;
+                };
+                return padDate(b.displayDate).localeCompare(padDate(a.displayDate));
+            });
+        }
+
         const groups = groupOrder.map(key => {
             const items = groupMap.get(key)!;
             const displayDate = items[0].displayDate;
