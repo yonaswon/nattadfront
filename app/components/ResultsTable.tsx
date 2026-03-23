@@ -532,37 +532,53 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const getDisplayDate = (r: typeof processedResults[0]) =>
             useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date);
 
-        // Group results sequentially to perfectly match Normal Export order
-        const groups: { key: string; label: string; items: { idx: number; r: typeof processedResults[0]; displayDate: string }[] }[] = [];
-        let currentKey = '';
-        let currentLabel = 'Unknown Date';
-        let currentItems: { idx: number; r: typeof processedResults[0]; displayDate: string }[] = [];
+        // Group results by month bucket 
+        const groupMap = new Map<string, { idx: number; r: typeof processedResults[0]; displayDate: string }[]>();
+        const groupOrder: string[] = [];
 
         for (let i = 0; i < processedResults.length; i++) {
             const dateStr = getDisplayDate(processedResults[i]);
             let groupKey = 'Unknown';
-            let groupLabel = 'Unknown Date';
             if (dateStr && dateStr !== '—') {
                 const parsed = parseDateForGroup(dateStr);
                 if (parsed && parsed.month >= 1 && parsed.month <= 12) {
                     groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
-                    groupLabel = `${monthNames[parsed.month - 1]} ${parsed.year}`;
                 }
             }
+            if (!groupMap.has(groupKey)) {
+                groupMap.set(groupKey, []);
+                groupOrder.push(groupKey);
+            }
+            groupMap.get(groupKey)!.push({ idx: i, r: processedResults[i], displayDate: dateStr });
+        }
 
-            if (groupKey !== currentKey) {
-                if (currentItems.length > 0) {
-                    groups.push({ key: currentKey, label: currentLabel, items: currentItems });
+        // Sort groupOrder descending (YYYY-MM string comparison works natively)
+        groupOrder.sort((a, b) => b.localeCompare(a));
+
+        // Sort items inside each group by exact Date descending
+        for (const key of groupOrder) {
+            groupMap.get(key)!.sort((a, b) => {
+                const padDate = (d: string) => {
+                    const p = d.split(/[-/]/);
+                    if (p.length < 3) return d;
+                    return `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}`;
+                };
+                return padDate(b.displayDate).localeCompare(padDate(a.displayDate));
+            });
+        }
+
+        const groups = groupOrder.map(key => {
+            const items = groupMap.get(key)!;
+            const displayDate = items[0].displayDate;
+            let label = 'Unknown Date';
+            if (displayDate && displayDate !== '—') {
+                const parsed = parseDateForGroup(displayDate);
+                if (parsed && parsed.month >= 1 && parsed.month <= 12) {
+                    label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
                 }
-                currentKey = groupKey;
-                currentLabel = groupLabel;
-                currentItems = [];
             }
-            currentItems.push({ idx: i, r: processedResults[i], displayDate: dateStr });
-        }
-        if (currentItems.length > 0) {
-            groups.push({ key: currentKey, label: currentLabel, items: currentItems });
-        }
+            return { key, label, items };
+        });
 
         // Build flat array of Excel rows with headers and totals
         const excelRows: Record<string, any>[] = [];
