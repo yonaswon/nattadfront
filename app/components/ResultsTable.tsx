@@ -271,7 +271,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             // If this date's year differs from the neighbor majority and most neighbors agree
             if (res.year !== neighborMajorYear && neighborMaxCount >= Math.ceil(neighborYears.length * 0.6)) {
                 const newTs = toTimestamp(neighborMajorYear, res.month, res.day);
-                if (newTs !== null) {
+                if (newTs !== null && newTs <= Date.now() + 86400000) {
                     resolved[i] = { ...res, year: neighborMajorYear, ts: newTs };
                 }
             }
