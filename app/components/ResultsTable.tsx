@@ -2,7 +2,7 @@
 
 import { useState, useMemo, Fragment } from 'react';
 import api from '../api';
-import * as XLSX from 'xlsx';
+import * as XLSX from 'xlsx-js-style';
 import { saveAs } from 'file-saver';
 
 interface TransactionResult {
@@ -519,7 +519,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 ? (r.ai_date || r.ocr_date || '')
                 : getSyncedValue(r.ocr_date, r.ai_date);
             let groupKey = 'Unknown';
-            if (dateStr && dateStr !== '\u2014') {
+            if (dateStr && dateStr !== '—') {
                 const parsed = parseDateForGroup(dateStr);
                 if (parsed) groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
             }
@@ -536,7 +536,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 ? (rows[0].ai_date || rows[0].ocr_date || '')
                 : getSyncedValue(rows[0].ocr_date, rows[0].ai_date);
             let label = 'Unknown Date';
-            if (dateStr && dateStr !== '\u2014') {
+            if (dateStr && dateStr !== '—') {
                 const parsed = parseDateForGroup(dateStr);
                 if (parsed) label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
             }
@@ -575,8 +575,59 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
 
         const ws = XLSX.utils.json_to_sheet(excelRows);
 
-        // Apply number formatting to Amount column
+        // Track which rows are month headers, data rows, and total rows for styling
         const range = XLSX.utils.decode_range(ws['!ref'] || '');
+        const numCols = range.e.c + 1;
+
+        // Apply alternating month shading and bold headers/totals
+        let currentRowIdx = 1; // row 0 is the sheet header
+        let monthIndex = 0;
+        for (const group of groups) {
+            const headerRowIdx = currentRowIdx;
+            const dataStart = currentRowIdx + 1;
+            const dataEnd = dataStart + group.rows.length - 1;
+            const totalRowIdx = dataEnd + 1;
+            const separatorRowIdx = totalRowIdx + 1;
+
+            const isGray = monthIndex % 2 === 1;
+            const fillColor = isGray ? 'E8E8E8' : 'FFFFFF';
+            const headerFill = isGray ? 'D0D0D0' : 'E2E8F0';
+
+            // Style month header row - bold, darker background
+            for (let C = 0; C < numCols; C++) {
+                const addr = XLSX.utils.encode_cell({ r: headerRowIdx, c: C });
+                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                ws[addr].s = {
+                    font: { bold: true, sz: 13 },
+                    fill: { fgColor: { rgb: headerFill } },
+                    alignment: { horizontal: 'left' }
+                };
+            }
+
+            // Style data rows with alternating fill
+            for (let R = dataStart; R <= dataEnd; R++) {
+                for (let C = 0; C < numCols; C++) {
+                    const addr = XLSX.utils.encode_cell({ r: R, c: C });
+                    if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                    ws[addr].s = { fill: { fgColor: { rgb: fillColor } } };
+                }
+            }
+
+            // Style total row - bold
+            for (let C = 0; C < numCols; C++) {
+                const addr = XLSX.utils.encode_cell({ r: totalRowIdx, c: C });
+                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
+                ws[addr].s = {
+                    font: { bold: true, sz: 12 },
+                    fill: { fgColor: { rgb: headerFill } },
+                };
+            }
+
+            currentRowIdx = separatorRowIdx + 1;
+            monthIndex++;
+        }
+
+        // Apply number formatting to Amount column
         for (let C = range.s.c; C <= range.e.c; ++C) {
             const headerAddr = XLSX.utils.encode_col(C) + '1';
             if (!ws[headerAddr]) continue;
