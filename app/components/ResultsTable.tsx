@@ -104,16 +104,49 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             }
         }
 
-        let currentRef = { d: 31, m: 12, y: majorityYear };
-        for (const r of fixed) {
-            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
-            if (p) {
-                const isSwapped = p.d <= 12 && p.m > 12;
-                currentRef = { d: isSwapped ? p.m : p.d, m: isSwapped ? p.d : p.m, y: majorityYear };
-                break;
-            }
-        }
+        // Helper: collect up to N valid parsed dates around index i (excluding i itself)
+        const collectNeighborDates = (idx: number, count: number): { above: Date[]; below: Date[]; delim: string } => {
+            const above: Date[] = [];
+            const below: Date[] = [];
+            let foundDelim = '/';
 
+            // Collect up to `count` valid dates ABOVE
+            for (let j = idx - 1; j >= 0 && above.length < count; j--) {
+                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
+                if (!ds || ds === '—') continue;
+                const p = parseDate(ds);
+                if (p && p.m >= 1 && p.m <= 12 && p.d >= 1 && p.d <= 31) {
+                    above.push(new Date(p.y, p.m - 1, p.d));
+                    foundDelim = p.delim;
+                }
+            }
+
+            // Collect up to `count` valid dates BELOW
+            for (let j = idx + 1; j < fixed.length && below.length < count; j++) {
+                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
+                if (!ds || ds === '—') continue;
+                const p = parseDate(ds);
+                if (p && p.m >= 1 && p.m <= 12 && p.d >= 1 && p.d <= 31) {
+                    below.push(new Date(p.y, p.m - 1, p.d));
+                    foundDelim = p.delim;
+                }
+            }
+
+            return { above, below, delim: foundDelim };
+        };
+
+        // Helper: score how well a candidate Date fits among neighbors chronologically
+        // Lower score = better fit (sum of absolute time distances to neighbors)
+        const chronoFitScore = (candidate: Date, neighbors: Date[]): number => {
+            if (neighbors.length === 0) return 0;
+            let score = 0;
+            for (const n of neighbors) {
+                score += Math.abs(candidate.getTime() - n.getTime());
+            }
+            return score / neighbors.length;
+        };
+
+        // First pass: fix years and decide day/month swap using 5 neighbors in each direction
         for (let i = 0; i < fixed.length; i++) {
             const r = fixed[i];
             const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
@@ -125,29 +158,31 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             let { d, m, y, delim } = parsed;
             let modified = false;
 
-            if (Math.abs(y - currentRef.y) > 1) {
-                y = currentRef.y;
+            // Fix year using majority
+            if (Math.abs(y - majorityYear) > 1) {
+                y = majorityYear;
                 modified = true;
             }
 
-            const val1 = dateToValue(y, m, d);
-            const val2 = dateToValue(y, d, m);
-            const refVal = dateToValue(currentRef.y, currentRef.m, currentRef.d) || 0;
+            // Only consider swap if both d and m are <= 12 (ambiguous case)
+            if (d <= 12 && m <= 12 && d !== m) {
+                const { above, below } = collectNeighborDates(i, 5);
+                const allNeighbors = [...above, ...below];
 
-            if (val1 && val2) {
-                const diff1 = val1 - refVal;
-                const diff2 = val2 - refVal;
+                if (allNeighbors.length > 0) {
+                    const originalDate = new Date(y, m - 1, d);   // DD/MM/YYYY interpretation
+                    const swappedDate = new Date(y, d - 1, m);    // MM/DD/YYYY → swap to DD/MM
 
-                if (diff1 > 0 && diff2 <= 0) {
-                    const temp = m; m = d; d = temp;
-                    modified = true;
-                } else if (diff1 > 0 && diff2 > 0) {
-                    if (diff2 < diff1) {
+                    const originalScore = chronoFitScore(originalDate, allNeighbors);
+                    const swappedScore = chronoFitScore(swappedDate, allNeighbors);
+
+                    if (swappedScore < originalScore) {
                         const temp = m; m = d; d = temp;
                         modified = true;
                     }
                 }
-            } else if (!val1 && val2) {
+            } else if (m > 12 && d <= 12) {
+                // Unambiguous: month > 12 means d and m are definitely swapped
                 const temp = m; m = d; d = temp;
                 modified = true;
             }
@@ -157,56 +192,27 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 if (r.ai_date) r.ai_date = newStr;
                 if (r.ocr_date) r.ocr_date = newStr;
             }
-
-            currentRef = { d, m, y };
         }
 
-        // Second pass: fill empty dates by interpolating from nearest neighbors
+        // Second pass: fill empty dates by interpolating from up to 5 nearest neighbors
         for (let i = 0; i < fixed.length; i++) {
             const r = fixed[i];
             const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
             if (dateStr && dateStr !== '—') continue; // already has a date
 
-            // Find nearest date above
-            let aboveDate: Date | null = null;
-            let aboveDelim = '/';
-            for (let j = i - 1; j >= 0; j--) {
-                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
-                const p = ds ? parseDate(ds) : null;
-                if (p) {
-                    aboveDate = new Date(p.y, p.m - 1, p.d);
-                    aboveDelim = p.delim;
-                    break;
-                }
-            }
-
-            // Find nearest date below
-            let belowDate: Date | null = null;
-            let belowDelim = '/';
-            for (let j = i + 1; j < fixed.length; j++) {
-                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
-                const p = ds ? parseDate(ds) : null;
-                if (p) {
-                    belowDate = new Date(p.y, p.m - 1, p.d);
-                    belowDelim = p.delim;
-                    break;
-                }
-            }
+            const { above, below, delim: usedDelim } = collectNeighborDates(i, 5);
 
             let filledDate: Date | null = null;
-            let usedDelim = '/';
 
-            if (aboveDate && belowDate) {
-                // Midpoint
-                const mid = new Date((aboveDate.getTime() + belowDate.getTime()) / 2);
-                filledDate = mid;
-                usedDelim = aboveDelim;
-            } else if (aboveDate) {
-                filledDate = aboveDate;
-                usedDelim = aboveDelim;
-            } else if (belowDate) {
-                filledDate = belowDate;
-                usedDelim = belowDelim;
+            if (above.length > 0 && below.length > 0) {
+                // Use the closest above and closest below for midpoint
+                const closestAbove = above[0]; // nearest above
+                const closestBelow = below[0]; // nearest below
+                filledDate = new Date((closestAbove.getTime() + closestBelow.getTime()) / 2);
+            } else if (above.length > 0) {
+                filledDate = above[0];
+            } else if (below.length > 0) {
+                filledDate = below[0];
             }
 
             if (filledDate) {
