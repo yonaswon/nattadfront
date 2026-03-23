@@ -2,7 +2,7 @@
 
 import { useState, useMemo, Fragment } from 'react';
 import api from '../api';
-import * as XLSX from 'xlsx-js-style';
+import * as XLSX from 'xlsx';
 import { saveAs } from 'file-saver';
 
 interface TransactionResult {
@@ -53,6 +53,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
     const [aiRedoChooser, setAiRedoChooser] = useState<TransactionResult | null>(null);
     const [takeAiResult, setTakeAiResult] = useState(false);
     const [applyDateFix, setApplyDateFix] = useState(false);
+    const [useAiDate, setUseAiDate] = useState(false);
 
     // Helper for "synced" view mode to merge text values
     const getSyncedValue = (ocrVal: string | null | undefined, aiVal: string | null | undefined): string => {
@@ -104,49 +105,16 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             }
         }
 
-        // Helper: collect up to N valid parsed dates around index i (excluding i itself)
-        const collectNeighborDates = (idx: number, count: number): { above: Date[]; below: Date[]; delim: string } => {
-            const above: Date[] = [];
-            const below: Date[] = [];
-            let foundDelim = '/';
-
-            // Collect up to `count` valid dates ABOVE
-            for (let j = idx - 1; j >= 0 && above.length < count; j--) {
-                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
-                if (!ds || ds === '—') continue;
-                const p = parseDate(ds);
-                if (p && p.m >= 1 && p.m <= 12 && p.d >= 1 && p.d <= 31) {
-                    above.push(new Date(p.y, p.m - 1, p.d));
-                    foundDelim = p.delim;
-                }
+        let currentRef = { d: 31, m: 12, y: majorityYear };
+        for (const r of fixed) {
+            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
+            if (p) {
+                const isSwapped = p.d <= 12 && p.m > 12;
+                currentRef = { d: isSwapped ? p.m : p.d, m: isSwapped ? p.d : p.m, y: majorityYear };
+                break;
             }
+        }
 
-            // Collect up to `count` valid dates BELOW
-            for (let j = idx + 1; j < fixed.length && below.length < count; j++) {
-                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
-                if (!ds || ds === '—') continue;
-                const p = parseDate(ds);
-                if (p && p.m >= 1 && p.m <= 12 && p.d >= 1 && p.d <= 31) {
-                    below.push(new Date(p.y, p.m - 1, p.d));
-                    foundDelim = p.delim;
-                }
-            }
-
-            return { above, below, delim: foundDelim };
-        };
-
-        // Helper: score how well a candidate Date fits among neighbors chronologically
-        // Lower score = better fit (sum of absolute time distances to neighbors)
-        const chronoFitScore = (candidate: Date, neighbors: Date[]): number => {
-            if (neighbors.length === 0) return 0;
-            let score = 0;
-            for (const n of neighbors) {
-                score += Math.abs(candidate.getTime() - n.getTime());
-            }
-            return score / neighbors.length;
-        };
-
-        // First pass: fix years and decide day/month swap using 5 neighbors in each direction
         for (let i = 0; i < fixed.length; i++) {
             const r = fixed[i];
             const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
@@ -158,31 +126,29 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             let { d, m, y, delim } = parsed;
             let modified = false;
 
-            // Fix year using majority
-            if (Math.abs(y - majorityYear) > 1) {
-                y = majorityYear;
+            if (Math.abs(y - currentRef.y) > 1) {
+                y = currentRef.y;
                 modified = true;
             }
 
-            // Only consider swap if both d and m are <= 12 (ambiguous case)
-            if (d <= 12 && m <= 12 && d !== m) {
-                const { above, below } = collectNeighborDates(i, 5);
-                const allNeighbors = [...above, ...below];
+            const val1 = dateToValue(y, m, d);
+            const val2 = dateToValue(y, d, m);
+            const refVal = dateToValue(currentRef.y, currentRef.m, currentRef.d) || 0;
 
-                if (allNeighbors.length > 0) {
-                    const originalDate = new Date(y, m - 1, d);   // DD/MM/YYYY interpretation
-                    const swappedDate = new Date(y, d - 1, m);    // MM/DD/YYYY → swap to DD/MM
+            if (val1 && val2) {
+                const diff1 = val1 - refVal;
+                const diff2 = val2 - refVal;
 
-                    const originalScore = chronoFitScore(originalDate, allNeighbors);
-                    const swappedScore = chronoFitScore(swappedDate, allNeighbors);
-
-                    if (swappedScore < originalScore) {
+                if (diff1 > 0 && diff2 <= 0) {
+                    const temp = m; m = d; d = temp;
+                    modified = true;
+                } else if (diff1 > 0 && diff2 > 0) {
+                    if (diff2 < diff1) {
                         const temp = m; m = d; d = temp;
                         modified = true;
                     }
                 }
-            } else if (m > 12 && d <= 12) {
-                // Unambiguous: month > 12 means d and m are definitely swapped
+            } else if (!val1 && val2) {
                 const temp = m; m = d; d = temp;
                 modified = true;
             }
@@ -192,37 +158,8 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 if (r.ai_date) r.ai_date = newStr;
                 if (r.ocr_date) r.ocr_date = newStr;
             }
-        }
 
-        // Second pass: fill empty dates by interpolating from up to 5 nearest neighbors
-        for (let i = 0; i < fixed.length; i++) {
-            const r = fixed[i];
-            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
-            if (dateStr && dateStr !== '—') continue; // already has a date
-
-            const { above, below, delim: usedDelim } = collectNeighborDates(i, 5);
-
-            let filledDate: Date | null = null;
-
-            if (above.length > 0 && below.length > 0) {
-                // Use the closest above and closest below for midpoint
-                const closestAbove = above[0]; // nearest above
-                const closestBelow = below[0]; // nearest below
-                filledDate = new Date((closestAbove.getTime() + closestBelow.getTime()) / 2);
-            } else if (above.length > 0) {
-                filledDate = above[0];
-            } else if (below.length > 0) {
-                filledDate = below[0];
-            }
-
-            if (filledDate) {
-                const dd = filledDate.getDate().toString().padStart(2, '0');
-                const mm = (filledDate.getMonth() + 1).toString().padStart(2, '0');
-                const yyyy = filledDate.getFullYear();
-                const filled = `${dd}${usedDelim}${mm}${usedDelim}${yyyy}`;
-                r.ocr_date = filled;
-                r.ai_date = filled;
-            }
+            currentRef = { d, m, y };
         }
 
         return fixed;
@@ -323,7 +260,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         };
 
         const rows = processedResults.map((r, idx) => {
-            const base: Record<string, any> = { '#': idx + 1 };
+            const base: Record<string, any> = { '#': idx + 1, 'Image': r.image_name, 'Status': r.status };
             if (viewMode === 'all' || viewMode === 'ocr') {
                 base['OCR Bank'] = r.ocr_bank_name || '';
                 base['OCR Ref ID'] = r.ocr_transaction_id || '';
@@ -347,7 +284,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             if (viewMode === 'synced') {
                 base['Bank'] = getSyncedBank(r.ocr_bank_name, r.ai_bank_name);
                 base['Ref ID'] = getSyncedValue(r.ocr_transaction_id, r.ai_reference_number);
-                base['Date'] = getSyncedValue(r.ocr_date, r.ai_date);
+                base['Date'] = useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date);
                 base['Sender'] = getSyncedValue(r.ocr_sender, r.ai_from_name);
                 base['Receiver'] = getSyncedValue(r.ocr_receiver, r.ai_to_name);
 
@@ -356,6 +293,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                     : (r.ai_amount || r.ocr_amount || '');
                 base['Amount'] = formatAmountForExcel(rawAmount);
             }
+            base['Needs Attention'] = r.needs_attention ? 'Yes' : 'No';
             return base;
         });
 
@@ -387,189 +325,6 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_${viewMode}.xlsx`);
     };
 
-    const exportToExcelMonthly = () => {
-        const formatAmountForExcel = (val: string | number | null | undefined): number => {
-            if (val === null || val === undefined) return 0;
-            if (typeof val === 'number') return val;
-            const strVal = val.toString().trim();
-            const match = strVal.match(/-?[\d,]+(\.\d+)?/);
-            if (match) {
-                const num = parseFloat(match[0].replace(/,/g, ''));
-                return isNaN(num) ? 0 : num;
-            }
-            return 0;
-        };
-
-        const parseDateForGroup = (dateStr: string): { month: number; year: number; dateObj: Date } | null => {
-            const parts = dateStr.split(/[-/]/);
-            if (parts.length < 3) return null;
-            const d = parseInt(parts[0], 10);
-            const m = parseInt(parts[1], 10);
-            let y = parseInt(parts[2], 10);
-            if (isNaN(d) || isNaN(m) || isNaN(y)) return null;
-            if (y < 100) y += 2000;
-            return { month: m, year: y, dateObj: new Date(y, m - 1, d) };
-        };
-
-        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-            'July', 'August', 'September', 'October', 'November', 'December'];
-
-        // Group results by month
-        const groups: { key: string; label: string; rows: typeof processedResults }[] = [];
-        const groupMap = new Map<string, typeof processedResults>();
-        const groupOrder: string[] = [];
-
-        for (const r of processedResults) {
-            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
-            let groupKey = 'Unknown';
-            let groupLabel = 'Unknown Date';
-            if (dateStr && dateStr !== '—') {
-                const parsed = parseDateForGroup(dateStr);
-                if (parsed) {
-                    groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
-                    groupLabel = `${monthNames[parsed.month - 1]} ${parsed.year}`;
-                }
-            }
-            if (!groupMap.has(groupKey)) {
-                groupMap.set(groupKey, []);
-                groupOrder.push(groupKey);
-            }
-            groupMap.get(groupKey)!.push(r);
-        }
-
-        for (const key of groupOrder) {
-            const rows = groupMap.get(key)!;
-            const first = rows[0];
-            const dateStr = getSyncedValue(first.ocr_date, first.ai_date);
-            let label = 'Unknown Date';
-            if (dateStr && dateStr !== '—') {
-                const parsed = parseDateForGroup(dateStr);
-                if (parsed) label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
-            }
-            groups.push({ key, label, rows });
-        }
-
-        // Build flat array of Excel rows with headers and totals
-        const excelRows: Record<string, any>[] = [];
-        const amountColName = 'Amount';
-
-        for (const group of groups) {
-            // Month header row
-            excelRows.push({ '#': group.label, 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
-
-            let monthTotal = 0;
-            group.rows.forEach((r, idx) => {
-                const amount = r.needs_attention && !takeAiResult
-                    ? formatAmountForExcel(r.ai_amount || r.ocr_amount)
-                    : formatAmountForExcel(r.ai_amount || r.ocr_amount);
-                monthTotal += amount;
-
-                excelRows.push({
-                    '#': idx + 1,
-                    'Bank': getSyncedBank(r.ocr_bank_name, r.ai_bank_name),
-                    'Ref ID': getSyncedValue(r.ocr_transaction_id, r.ai_reference_number),
-                    'Date': getSyncedValue(r.ocr_date, r.ai_date),
-                    'Sender': getSyncedValue(r.ocr_sender, r.ai_from_name),
-                    'Receiver': getSyncedValue(r.ocr_receiver, r.ai_to_name),
-                    [amountColName]: amount,
-                });
-            });
-
-            // Total row
-            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': 'TOTAL', [amountColName]: monthTotal });
-            // Empty separator row
-            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
-        }
-
-        const ws = XLSX.utils.json_to_sheet(excelRows);
-
-        // Track which rows are month headers, data rows, and total rows for styling
-        const range = XLSX.utils.decode_range(ws['!ref'] || '');
-        const numCols = range.e.c + 1;
-
-        // Build a map of row types
-        let currentRowIdx = 1; // row 0 is the sheet header
-        let monthIndex = 0;
-        for (const group of groups) {
-            const headerRowIdx = currentRowIdx; // month header
-            const dataStart = currentRowIdx + 1;
-            const dataEnd = dataStart + group.rows.length - 1;
-            const totalRowIdx = dataEnd + 1;
-            const separatorRowIdx = totalRowIdx + 1;
-
-            const isGray = monthIndex % 2 === 1;
-            const fillColor = isGray ? 'E8E8E8' : 'FFFFFF';
-
-            // Style month header row - bold, slightly darker background
-            for (let C = 0; C < numCols; C++) {
-                const addr = XLSX.utils.encode_cell({ r: headerRowIdx, c: C });
-                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
-                ws[addr].s = {
-                    font: { bold: true, sz: 13 },
-                    fill: { fgColor: { rgb: isGray ? 'D0D0D0' : 'E2E8F0' } },
-                    alignment: { horizontal: 'left' }
-                };
-            }
-
-            // Style data rows with alternating fill
-            for (let R = dataStart; R <= dataEnd; R++) {
-                for (let C = 0; C < numCols; C++) {
-                    const addr = XLSX.utils.encode_cell({ r: R, c: C });
-                    if (!ws[addr]) ws[addr] = { v: '', t: 's' };
-                    ws[addr].s = {
-                        fill: { fgColor: { rgb: fillColor } },
-                    };
-                }
-            }
-
-            // Style total row - bold
-            for (let C = 0; C < numCols; C++) {
-                const addr = XLSX.utils.encode_cell({ r: totalRowIdx, c: C });
-                if (!ws[addr]) ws[addr] = { v: '', t: 's' };
-                ws[addr].s = {
-                    font: { bold: true, sz: 12 },
-                    fill: { fgColor: { rgb: isGray ? 'D0D0D0' : 'E2E8F0' } },
-                };
-            }
-
-            currentRowIdx = separatorRowIdx + 1;
-            monthIndex++;
-        }
-
-        // Apply number formatting to Amount column
-        for (let C = range.s.c; C <= range.e.c; ++C) {
-            const headerAddr = XLSX.utils.encode_col(C) + '1';
-            if (!ws[headerAddr]) continue;
-            if (ws[headerAddr].v === amountColName) {
-                for (let R = range.s.r + 1; R <= range.e.r; ++R) {
-                    const cellAddr = XLSX.utils.encode_cell({ r: R, c: C });
-                    if (ws[cellAddr] && typeof ws[cellAddr].v === 'number') {
-                        ws[cellAddr].t = 'n';
-                        ws[cellAddr].z = '#,##0.00';
-                        // preserve existing style
-                        ws[cellAddr].s = { ...ws[cellAddr].s, numFmt: '#,##0.00' };
-                    }
-                }
-            }
-        }
-
-        // Set column widths (wider for Sender and Receiver)
-        ws['!cols'] = [
-            { wch: 6 },   // #
-            { wch: 18 },  // Bank
-            { wch: 20 },  // Ref ID
-            { wch: 14 },  // Date
-            { wch: 30 },  // Sender
-            { wch: 30 },  // Receiver
-            { wch: 16 },  // Amount
-        ];
-
-        const wb = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(wb, ws, 'Monthly Results');
-        const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-        saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_monthly.xlsx`);
-    };
-
     const exportToPdf = () => {
         const showOcr = viewMode === 'all' || viewMode === 'ocr';
         const showAi = viewMode === 'all' || viewMode === 'ai';
@@ -592,7 +347,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 const amountText = r.needs_attention && !takeAiResult ? '⚠️ Mismatch' : (r.ai_amount || r.ocr_amount || '');
                 rows += `<td>${getSyncedBank(r.ocr_bank_name, r.ai_bank_name)}</td>
                          <td>${getSyncedValue(r.ocr_transaction_id, r.ai_reference_number)}</td>
-                         <td>${getSyncedValue(r.ocr_date, r.ai_date)}</td>
+                         <td>${useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date)}</td>
                          <td>${getSyncedValue(r.ocr_sender, r.ai_from_name)}</td>
                          <td>${getSyncedValue(r.ocr_receiver, r.ai_to_name)}</td>
                          <td>${amountText}</td>`;
@@ -676,6 +431,15 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                                 />
                                 🤖 Take AI Result
                             </label>
+                            <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', gap: '6px', marginRight: '8px', background: '#f3f4f6', padding: '4px 10px', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
+                                <input
+                                    type="checkbox"
+                                    checked={useAiDate}
+                                    onChange={(e) => setUseAiDate(e.target.checked)}
+                                    style={{ accentColor: '#0ea5e9' }}
+                                />
+                                📅 Use AI Date
+                            </label>
                         </>
                     )}
                     <button
@@ -685,14 +449,6 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                         style={{ background: '#217346', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
                     >
                         📊 Export Excel
-                    </button>
-                    <button
-                        className="btn btn-sm"
-                        onClick={exportToExcelMonthly}
-                        disabled={results.length === 0}
-                        style={{ background: '#0d6efd', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
-                    >
-                        📊 Export Monthly
                     </button>
                     <button
                         className="btn btn-sm"
@@ -898,7 +654,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                                         <td className="mono" style={{ maxWidth: '180px', wordBreak: 'break-all' }}>
                                             {getSyncedValue(result.ocr_transaction_id, result.ai_reference_number)}
                                         </td>
-                                        <td>{getSyncedValue(result.ocr_date, result.ai_date)}</td>
+                                        <td>{useAiDate ? (result.ai_date || result.ocr_date || '—') : getSyncedValue(result.ocr_date, result.ai_date)}</td>
                                         <td>{getSyncedValue(result.ocr_sender, result.ai_from_name)}</td>
                                         <td>{getSyncedValue(result.ocr_receiver, result.ai_to_name)}</td>
                                         <td className={`amount-cell ${result.needs_attention && !takeAiResult ? 'amount-mismatch' : ''}`} style={{ minWidth: '160px' }}>
