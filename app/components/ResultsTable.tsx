@@ -148,89 +148,87 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         }
         const isDescending = descVotes >= ascVotes; // true = newest first (most common)
 
-        // ── Pass 4: Resolve ambiguous dates using nearby anchors ──
-        for (let i = 0; i < fixed.length; i++) {
-            if (resolved[i]) continue; // already resolved
+        // ── Pass 4: Resolve ambiguous dates ITERATIVELY using nearby anchors ──
+        // After resolving each date, it immediately becomes an anchor for neighbors.
+        // Search up to 20 rows in each direction for anchors.
+        const ANCHOR_SEARCH = 20;
 
-            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+        const resolveAmbiguous = (idx: number) => {
+            if (resolved[idx]) return; // already resolved
+
+            const dateStr = getSyncedValue(fixed[idx].ocr_date, fixed[idx].ai_date);
             const p = parseDate(dateStr);
-            if (!p) continue;
+            if (!p) return;
 
             let { d, m, y, delim } = p;
             if (Math.abs(y - majorityYear) > 1) y = majorityYear;
 
-            // Both d and m are <= 12 — ambiguous
-            if (d <= 12 && m <= 12) {
-                // Collect up to 5 resolved anchor dates above and below
-                const anchorsAbove: Resolved[] = [];
-                const anchorsBelow: Resolved[] = [];
-                for (let j = i - 1; j >= 0 && anchorsAbove.length < 5; j--) {
-                    if (resolved[j]) anchorsAbove.push(resolved[j]!);
-                }
-                for (let j = i + 1; j < fixed.length && anchorsBelow.length < 5; j++) {
-                    if (resolved[j]) anchorsBelow.push(resolved[j]!);
-                }
+            if (!(d <= 12 && m <= 12)) return; // not ambiguous
 
-                const allAnchors = [...anchorsAbove, ...anchorsBelow];
-
-                // Candidate 1: original interpretation (first=day, second=month)
-                const ts1 = toTimestamp(y, m, d);
-                // Candidate 2: swapped interpretation (first=month, second=day)
-                const ts2 = toTimestamp(y, d, m);
-
-                if (ts1 !== null && ts2 !== null && allAnchors.length > 0) {
-                    // Score: how well does each interpretation fit chronologically?
-                    // For descending data: the date should be <= nearest above anchor and >= nearest below anchor
-                    // We score based on average distance to neighbors (lower = better)
-                    // BUT also penalize if it breaks the sort order
-
-                    let score1 = 0, score2 = 0;
-
-                    // Check nearest above (should be >= this date in descending order)
-                    if (anchorsAbove.length > 0) {
-                        const nearestAbove = anchorsAbove[0];
-                        if (isDescending) {
-                            // In descending order, above anchor should have a LATER date
-                            if (ts1 > nearestAbove.ts) score1 += 100; // penalty: we're later than our ancestor
-                            if (ts2 > nearestAbove.ts) score2 += 100;
-                        } else {
-                            // In ascending order, above anchor should have an EARLIER date
-                            if (ts1 < nearestAbove.ts) score1 += 100;
-                            if (ts2 < nearestAbove.ts) score2 += 100;
-                        }
-                    }
-
-                    // Check nearest below (should be <= this date in descending order)
-                    if (anchorsBelow.length > 0) {
-                        const nearestBelow = anchorsBelow[0];
-                        if (isDescending) {
-                            if (ts1 < nearestBelow.ts) score1 += 100;
-                            if (ts2 < nearestBelow.ts) score2 += 100;
-                        } else {
-                            if (ts1 > nearestBelow.ts) score1 += 100;
-                            if (ts2 > nearestBelow.ts) score2 += 100;
-                        }
-                    }
-
-                    // Tie-breaker: use average distance to all anchors (closer = better)
-                    for (const a of allAnchors) {
-                        score1 += Math.abs(ts1 - a.ts);
-                        score2 += Math.abs(ts2 - a.ts);
-                    }
-
-                    if (score2 < score1) {
-                        // Swapped interpretation is better
-                        resolved[i] = { day: m, month: d, year: y, ts: ts2, delim };
-                    } else {
-                        resolved[i] = { day: d, month: m, year: y, ts: ts1, delim };
-                    }
-                } else if (ts1 !== null) {
-                    resolved[i] = { day: d, month: m, year: y, ts: ts1, delim };
-                } else if (ts2 !== null) {
-                    resolved[i] = { day: m, month: d, year: y, ts: ts2, delim };
-                }
+            // Collect resolved anchor dates above and below
+            const anchorsAbove: Resolved[] = [];
+            const anchorsBelow: Resolved[] = [];
+            for (let j = idx - 1; j >= 0 && anchorsAbove.length < ANCHOR_SEARCH; j--) {
+                if (resolved[j]) anchorsAbove.push(resolved[j]!);
             }
-        }
+            for (let j = idx + 1; j < fixed.length && anchorsBelow.length < ANCHOR_SEARCH; j++) {
+                if (resolved[j]) anchorsBelow.push(resolved[j]!);
+            }
+
+            const allAnchors = [...anchorsAbove, ...anchorsBelow];
+
+            const ts1 = toTimestamp(y, m, d);
+            const ts2 = toTimestamp(y, d, m);
+
+            if (ts1 !== null && ts2 !== null && allAnchors.length > 0) {
+                let score1 = 0, score2 = 0;
+
+                if (anchorsAbove.length > 0) {
+                    const nearestAbove = anchorsAbove[0];
+                    if (isDescending) {
+                        if (ts1 > nearestAbove.ts) score1 += 100;
+                        if (ts2 > nearestAbove.ts) score2 += 100;
+                    } else {
+                        if (ts1 < nearestAbove.ts) score1 += 100;
+                        if (ts2 < nearestAbove.ts) score2 += 100;
+                    }
+                }
+
+                if (anchorsBelow.length > 0) {
+                    const nearestBelow = anchorsBelow[0];
+                    if (isDescending) {
+                        if (ts1 < nearestBelow.ts) score1 += 100;
+                        if (ts2 < nearestBelow.ts) score2 += 100;
+                    } else {
+                        if (ts1 > nearestBelow.ts) score1 += 100;
+                        if (ts2 > nearestBelow.ts) score2 += 100;
+                    }
+                }
+
+                for (const a of allAnchors) {
+                    score1 += Math.abs(ts1 - a.ts);
+                    score2 += Math.abs(ts2 - a.ts);
+                }
+
+                if (score2 < score1) {
+                    resolved[idx] = { day: m, month: d, year: y, ts: ts2, delim };
+                } else {
+                    resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
+                }
+            } else if (ts1 !== null && d === m) {
+                // Same value (e.g. 03/03), no swap needed
+                resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
+            } else if (ts1 !== null) {
+                resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
+            } else if (ts2 !== null) {
+                resolved[idx] = { day: m, month: d, year: y, ts: ts2, delim };
+            }
+        };
+
+        // Forward pass: resolve from top to bottom
+        for (let i = 0; i < fixed.length; i++) resolveAmbiguous(i);
+        // Backward pass: catch any still-unresolved dates using newly resolved anchors
+        for (let i = fixed.length - 1; i >= 0; i--) resolveAmbiguous(i);
 
         // ── Pass 4.5: Fix years that don't match their chronological neighborhood ──
         for (let i = 0; i < resolved.length; i++) {
