@@ -73,6 +73,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const fixed = results.map(r => ({ ...r }));
 
         const parseDate = (d: string) => {
+            if (!d || d === '—') return null;
             const parts = d.split(/[-/]/);
             if (parts.length < 3) return null;
             const ds = parseInt(parts[0], 10);
@@ -82,84 +83,203 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             return { d: ds, m: ms, y: ys > 100 ? ys : ys + 2000, delim: d.includes('-') ? '-' : '/' };
         };
 
-        const dateToValue = (y: number, m: number, d: number) => {
+        const toTimestamp = (y: number, m: number, d: number): number | null => {
             if (m < 1 || m > 12 || d < 1 || d > 31) return null;
             return new Date(y, m - 1, d).getTime();
         };
 
+        const formatDate = (d: number, m: number, y: number, delim: string) =>
+            `${d.toString().padStart(2, '0')}${delim}${m.toString().padStart(2, '0')}${delim}${y}`;
+
+        // ── Pass 1: Determine majority year from all dates ──
         const yearCounts: Record<number, number> = {};
-        fixed.slice(0, 20).forEach(r => {
-            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
-            const p = parseDate(dateStr);
+        fixed.forEach(r => {
+            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
             if (p && p.y > 2000 && p.y < 2100) {
                 yearCounts[p.y] = (yearCounts[p.y] || 0) + 1;
             }
         });
-
         let majorityYear = new Date().getFullYear();
         let maxCount = 0;
         for (const [y, count] of Object.entries(yearCounts)) {
-            if (count > maxCount) {
-                maxCount = count;
-                majorityYear = parseInt(y, 10);
+            if (count > maxCount) { maxCount = count; majorityYear = parseInt(y, 10); }
+        }
+
+        // ── Pass 2: Build resolved dates array ──
+        // For each row, determine the correct DD/MM/YYYY interpretation.
+        // resolved[i] = { day, month, year, ts, delim } or null if no date
+        type Resolved = { day: number; month: number; year: number; ts: number; delim: string };
+        const resolved: (Resolved | null)[] = new Array(fixed.length).fill(null);
+
+        // First resolve UNAMBIGUOUS dates (where one part > 12, so we know which is day vs month)
+        for (let i = 0; i < fixed.length; i++) {
+            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+            const p = parseDate(dateStr);
+            if (!p) continue;
+
+            let { d, m, y, delim } = p;
+            // Fix year
+            if (Math.abs(y - majorityYear) > 1) y = majorityYear;
+
+            if (d > 12 && m <= 12) {
+                // d must be the day (>12 can't be month) → DD/MM format, correct as-is
+                const ts = toTimestamp(y, m, d);
+                if (ts !== null) resolved[i] = { day: d, month: m, year: y, ts, delim };
+            } else if (m > 12 && d <= 12) {
+                // m position holds a value >12, so it must actually be the day → swap
+                const ts = toTimestamp(y, d, m);
+                if (ts !== null) resolved[i] = { day: m, month: d, year: y, ts, delim };
+            }
+            // If both <= 12, it's ambiguous — skip for now
+        }
+
+        // ── Pass 3: Determine sort direction from unambiguous dates ──
+        // Compare pairs of resolved dates to vote on ascending vs descending
+        let ascVotes = 0, descVotes = 0;
+        let prevResolved: Resolved | null = null;
+        for (let i = 0; i < resolved.length; i++) {
+            if (resolved[i]) {
+                if (prevResolved) {
+                    if (resolved[i]!.ts < prevResolved.ts) descVotes++;
+                    else if (resolved[i]!.ts > prevResolved.ts) ascVotes++;
+                }
+                prevResolved = resolved[i];
+            }
+        }
+        const isDescending = descVotes >= ascVotes; // true = newest first (most common)
+
+        // ── Pass 4: Resolve ambiguous dates using nearby anchors ──
+        for (let i = 0; i < fixed.length; i++) {
+            if (resolved[i]) continue; // already resolved
+
+            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+            const p = parseDate(dateStr);
+            if (!p) continue;
+
+            let { d, m, y, delim } = p;
+            if (Math.abs(y - majorityYear) > 1) y = majorityYear;
+
+            // Both d and m are <= 12 — ambiguous
+            if (d <= 12 && m <= 12) {
+                // Collect up to 5 resolved anchor dates above and below
+                const anchorsAbove: Resolved[] = [];
+                const anchorsBelow: Resolved[] = [];
+                for (let j = i - 1; j >= 0 && anchorsAbove.length < 5; j--) {
+                    if (resolved[j]) anchorsAbove.push(resolved[j]!);
+                }
+                for (let j = i + 1; j < fixed.length && anchorsBelow.length < 5; j++) {
+                    if (resolved[j]) anchorsBelow.push(resolved[j]!);
+                }
+
+                const allAnchors = [...anchorsAbove, ...anchorsBelow];
+
+                // Candidate 1: original interpretation (first=day, second=month)
+                const ts1 = toTimestamp(y, m, d);
+                // Candidate 2: swapped interpretation (first=month, second=day)
+                const ts2 = toTimestamp(y, d, m);
+
+                if (ts1 !== null && ts2 !== null && allAnchors.length > 0) {
+                    // Score: how well does each interpretation fit chronologically?
+                    // For descending data: the date should be <= nearest above anchor and >= nearest below anchor
+                    // We score based on average distance to neighbors (lower = better)
+                    // BUT also penalize if it breaks the sort order
+
+                    let score1 = 0, score2 = 0;
+
+                    // Check nearest above (should be >= this date in descending order)
+                    if (anchorsAbove.length > 0) {
+                        const nearestAbove = anchorsAbove[0];
+                        if (isDescending) {
+                            // In descending order, above anchor should have a LATER date
+                            if (ts1 > nearestAbove.ts) score1 += 100; // penalty: we're later than our ancestor
+                            if (ts2 > nearestAbove.ts) score2 += 100;
+                        } else {
+                            // In ascending order, above anchor should have an EARLIER date
+                            if (ts1 < nearestAbove.ts) score1 += 100;
+                            if (ts2 < nearestAbove.ts) score2 += 100;
+                        }
+                    }
+
+                    // Check nearest below (should be <= this date in descending order)
+                    if (anchorsBelow.length > 0) {
+                        const nearestBelow = anchorsBelow[0];
+                        if (isDescending) {
+                            if (ts1 < nearestBelow.ts) score1 += 100;
+                            if (ts2 < nearestBelow.ts) score2 += 100;
+                        } else {
+                            if (ts1 > nearestBelow.ts) score1 += 100;
+                            if (ts2 > nearestBelow.ts) score2 += 100;
+                        }
+                    }
+
+                    // Tie-breaker: use average distance to all anchors (closer = better)
+                    for (const a of allAnchors) {
+                        score1 += Math.abs(ts1 - a.ts);
+                        score2 += Math.abs(ts2 - a.ts);
+                    }
+
+                    if (score2 < score1) {
+                        // Swapped interpretation is better
+                        resolved[i] = { day: m, month: d, year: y, ts: ts2, delim };
+                    } else {
+                        resolved[i] = { day: d, month: m, year: y, ts: ts1, delim };
+                    }
+                } else if (ts1 !== null) {
+                    resolved[i] = { day: d, month: m, year: y, ts: ts1, delim };
+                } else if (ts2 !== null) {
+                    resolved[i] = { day: m, month: d, year: y, ts: ts2, delim };
+                }
             }
         }
 
-        let currentRef = { d: 31, m: 12, y: majorityYear };
-        for (const r of fixed) {
-            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
-            if (p) {
-                const isSwapped = p.d <= 12 && p.m > 12;
-                currentRef = { d: isSwapped ? p.m : p.d, m: isSwapped ? p.d : p.m, y: majorityYear };
-                break;
-            }
-        }
-
+        // ── Pass 5: Apply resolved dates back to the data ──
         for (let i = 0; i < fixed.length; i++) {
             const r = fixed[i];
+            const res = resolved[i];
+            if (!res) continue;
+
             const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
-            if (!dateStr || dateStr === '—') continue;
+            const p = parseDate(dateStr);
+            if (!p) continue;
 
-            const parsed = parseDate(dateStr);
-            if (!parsed) continue;
-
-            let { d, m, y, delim } = parsed;
-            let modified = false;
-
-            if (Math.abs(y - currentRef.y) > 1) {
-                y = currentRef.y;
-                modified = true;
-            }
-
-            const val1 = dateToValue(y, m, d);
-            const val2 = dateToValue(y, d, m);
-            const refVal = dateToValue(currentRef.y, currentRef.m, currentRef.d) || 0;
-
-            if (val1 && val2) {
-                const diff1 = val1 - refVal;
-                const diff2 = val2 - refVal;
-
-                if (diff1 > 0 && diff2 <= 0) {
-                    const temp = m; m = d; d = temp;
-                    modified = true;
-                } else if (diff1 > 0 && diff2 > 0) {
-                    if (diff2 < diff1) {
-                        const temp = m; m = d; d = temp;
-                        modified = true;
-                    }
-                }
-            } else if (!val1 && val2) {
-                const temp = m; m = d; d = temp;
-                modified = true;
-            }
-
-            if (modified) {
-                const newStr = `${d.toString().padStart(2, '0')}${delim}${m.toString().padStart(2, '0')}${delim}${y}`;
+            // Check if the resolved date differs from the raw parsed date
+            const rawY = p.y > 100 ? p.y : p.y + 2000;
+            if (p.d !== res.day || p.m !== res.month || rawY !== res.year) {
+                const newStr = formatDate(res.day, res.month, res.year, res.delim);
                 if (r.ai_date) r.ai_date = newStr;
                 if (r.ocr_date) r.ocr_date = newStr;
             }
+        }
 
-            currentRef = { d, m, y };
+        // ── Pass 6: Fill empty dates from nearest neighbors ──
+        for (let i = 0; i < fixed.length; i++) {
+            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+            if (dateStr && dateStr !== '—') continue;
+
+            let aboveRes: Resolved | null = null;
+            let belowRes: Resolved | null = null;
+            for (let j = i - 1; j >= 0; j--) { if (resolved[j]) { aboveRes = resolved[j]; break; } }
+            for (let j = i + 1; j < fixed.length; j++) { if (resolved[j]) { belowRes = resolved[j]; break; } }
+
+            let filledDate: Date | null = null;
+            let usedDelim = '/';
+
+            if (aboveRes && belowRes) {
+                filledDate = new Date((aboveRes.ts + belowRes.ts) / 2);
+                usedDelim = aboveRes.delim;
+            } else if (aboveRes) {
+                filledDate = new Date(aboveRes.ts);
+                usedDelim = aboveRes.delim;
+            } else if (belowRes) {
+                filledDate = new Date(belowRes.ts);
+                usedDelim = belowRes.delim;
+            }
+
+            if (filledDate) {
+                const filled = formatDate(filledDate.getDate(), filledDate.getMonth() + 1, filledDate.getFullYear(), usedDelim);
+                fixed[i].ocr_date = filled;
+                fixed[i].ai_date = filled;
+            }
         }
 
         return fixed;
