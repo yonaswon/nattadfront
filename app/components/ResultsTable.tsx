@@ -483,6 +483,131 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_${viewMode}.xlsx`);
     };
 
+    const exportToExcelMonthly = () => {
+        const formatAmountForExcel = (val: string | number | null | undefined): number => {
+            if (val === null || val === undefined) return 0;
+            if (typeof val === 'number') return val;
+            const strVal = val.toString().trim();
+            const match = strVal.match(/-?[\d,]+(\.\d+)?/);
+            if (match) {
+                const num = parseFloat(match[0].replace(/,/g, ''));
+                return isNaN(num) ? 0 : num;
+            }
+            return 0;
+        };
+
+        const parseDateForGroup = (dateStr: string): { month: number; year: number } | null => {
+            const parts = dateStr.split(/[-/]/);
+            if (parts.length < 3) return null;
+            const d = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            let y = parseInt(parts[2], 10);
+            if (isNaN(d) || isNaN(m) || isNaN(y)) return null;
+            if (y < 100) y += 2000;
+            return { month: m, year: y };
+        };
+
+        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December'];
+
+        // Group results by month
+        const groupMap = new Map<string, typeof processedResults>();
+        const groupOrder: string[] = [];
+
+        for (const r of processedResults) {
+            const dateStr = useAiDate
+                ? (r.ai_date || r.ocr_date || '')
+                : getSyncedValue(r.ocr_date, r.ai_date);
+            let groupKey = 'Unknown';
+            if (dateStr && dateStr !== '\u2014') {
+                const parsed = parseDateForGroup(dateStr);
+                if (parsed) groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
+            }
+            if (!groupMap.has(groupKey)) {
+                groupMap.set(groupKey, []);
+                groupOrder.push(groupKey);
+            }
+            groupMap.get(groupKey)!.push(r);
+        }
+
+        const groups = groupOrder.map(key => {
+            const rows = groupMap.get(key)!;
+            const dateStr = useAiDate
+                ? (rows[0].ai_date || rows[0].ocr_date || '')
+                : getSyncedValue(rows[0].ocr_date, rows[0].ai_date);
+            let label = 'Unknown Date';
+            if (dateStr && dateStr !== '\u2014') {
+                const parsed = parseDateForGroup(dateStr);
+                if (parsed) label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
+            }
+            return { key, label, rows };
+        });
+
+        // Build flat array of Excel rows with headers and totals
+        const excelRows: Record<string, any>[] = [];
+        const amountColName = 'Amount';
+
+        for (const group of groups) {
+            // Month header row
+            excelRows.push({ '#': group.label, 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
+
+            let monthTotal = 0;
+            group.rows.forEach((r, idx) => {
+                const amount = formatAmountForExcel(r.ai_amount || r.ocr_amount);
+                monthTotal += amount;
+
+                excelRows.push({
+                    '#': idx + 1,
+                    'Bank': getSyncedBank(r.ocr_bank_name, r.ai_bank_name),
+                    'Ref ID': getSyncedValue(r.ocr_transaction_id, r.ai_reference_number),
+                    'Date': useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date),
+                    'Sender': getSyncedValue(r.ocr_sender, r.ai_from_name),
+                    'Receiver': getSyncedValue(r.ocr_receiver, r.ai_to_name),
+                    [amountColName]: amount,
+                });
+            });
+
+            // Total row
+            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': 'TOTAL', [amountColName]: monthTotal });
+            // Empty separator row
+            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
+        }
+
+        const ws = XLSX.utils.json_to_sheet(excelRows);
+
+        // Apply number formatting to Amount column
+        const range = XLSX.utils.decode_range(ws['!ref'] || '');
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+            const headerAddr = XLSX.utils.encode_col(C) + '1';
+            if (!ws[headerAddr]) continue;
+            if (ws[headerAddr].v === amountColName) {
+                for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+                    const cellAddr = XLSX.utils.encode_cell({ r: R, c: C });
+                    if (ws[cellAddr] && typeof ws[cellAddr].v === 'number') {
+                        ws[cellAddr].t = 'n';
+                        ws[cellAddr].z = '#,##0.00';
+                    }
+                }
+            }
+        }
+
+        // Set column widths (wider for Sender and Receiver)
+        ws['!cols'] = [
+            { wch: 18 },  // # / month label
+            { wch: 18 },  // Bank
+            { wch: 20 },  // Ref ID
+            { wch: 14 },  // Date
+            { wch: 30 },  // Sender
+            { wch: 30 },  // Receiver
+            { wch: 16 },  // Amount
+        ];
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Monthly Results');
+        const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_monthly.xlsx`);
+    };
+
     const exportToPdf = () => {
         const showOcr = viewMode === 'all' || viewMode === 'ocr';
         const showAi = viewMode === 'all' || viewMode === 'ai';
@@ -607,6 +732,14 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                         style={{ background: '#217346', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
                     >
                         📊 Export Excel
+                    </button>
+                    <button
+                        className="btn btn-sm"
+                        onClick={exportToExcelMonthly}
+                        disabled={results.length === 0}
+                        style={{ background: '#0d6efd', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
+                    >
+                        📊 Export Monthly
                     </button>
                     <button
                         className="btn btn-sm"
