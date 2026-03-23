@@ -494,7 +494,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             return 0;
         };
 
-        const parseDateForGroup = (dateStr: string): { month: number; year: number } | null => {
+        const parseDateForGroup = (dateStr: string): { day: number; month: number; year: number } | null => {
             const parts = dateStr.split(/[-/]/);
             if (parts.length < 3) return null;
             const d = parseInt(parts[0], 10);
@@ -502,43 +502,122 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             let y = parseInt(parts[2], 10);
             if (isNaN(d) || isNaN(m) || isNaN(y)) return null;
             if (y < 100) y += 2000;
-            return { month: m, year: y };
+            return { day: d, month: m, year: y };
         };
 
         const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
             'July', 'August', 'September', 'October', 'November', 'December'];
 
-        // Group results by month
-        const groupMap = new Map<string, typeof processedResults>();
+        // Pre-compute every display date from processedResults — EXACTLY as the dashboard shows them
+        // Then apply an inline swap safety net for any ambiguous dates
+        const displayDates: string[] = processedResults.map(r =>
+            useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date)
+        );
+
+        // Inline date swap safety net: check each date against neighbors for chronological consistency
+        // This catches any date where the month/day might still be swapped
+        const parsedDates = displayDates.map(d => parseDateForGroup(d));
+
+        // Determine majority year
+        const yrCounts: Record<number, number> = {};
+        parsedDates.forEach(p => { if (p && p.year > 2000 && p.year < 2100) yrCounts[p.year] = (yrCounts[p.year] || 0) + 1; });
+        let majYear = new Date().getFullYear();
+        let majMax = 0;
+        for (const [y, c] of Object.entries(yrCounts)) { if (c > majMax) { majMax = c; majYear = parseInt(y, 10); } }
+
+        // Collect unambiguous dates as anchors (where day > 12, month is certain)
+        const anchorTimestamps: (number | null)[] = parsedDates.map(p => {
+            if (!p) return null;
+            const y = Math.abs(p.year - majYear) > 1 ? majYear : p.year;
+            if (p.day > 12 && p.month <= 12) return new Date(y, p.month - 1, p.day).getTime();
+            if (p.month > 12 && p.day <= 12) return new Date(y, p.day - 1, p.month).getTime();
+            return null;
+        });
+
+        // For ambiguous dates, decide swap by checking which interpretation fits nearest anchors
+        for (let i = 0; i < parsedDates.length; i++) {
+            const p = parsedDates[i];
+            if (!p || p.day > 12 || p.month > 12) continue; // unambiguous or missing
+            if (p.day === p.month) continue; // same value, no swap needed
+
+            const y = Math.abs(p.year - majYear) > 1 ? majYear : p.year;
+            const ts1 = new Date(y, p.month - 1, p.day).getTime();
+            const ts2 = new Date(y, p.day - 1, p.month).getTime();
+
+            // Find nearest anchor timestamps above and below
+            const nearAnchors: number[] = [];
+            for (let j = i - 1; j >= 0 && nearAnchors.length < 10; j--) {
+                if (anchorTimestamps[j] !== null) nearAnchors.push(anchorTimestamps[j]!);
+            }
+            for (let j = i + 1; j < parsedDates.length && nearAnchors.length < 20; j++) {
+                if (anchorTimestamps[j] !== null) nearAnchors.push(anchorTimestamps[j]!);
+            }
+
+            if (nearAnchors.length > 0) {
+                let score1 = 0, score2 = 0;
+                for (const a of nearAnchors) {
+                    score1 += Math.abs(ts1 - a);
+                    score2 += Math.abs(ts2 - a);
+                }
+                if (score2 < score1) {
+                    // Swap is better: update the display date
+                    const delim = displayDates[i].includes('-') ? '-' : '/';
+                    displayDates[i] = `${p.month.toString().padStart(2, '0')}${delim}${p.day.toString().padStart(2, '0')}${delim}${y}`;
+                    parsedDates[i] = { day: p.month, month: p.day, year: y };
+                } else if (Math.abs(p.year - majYear) > 1) {
+                    // Just fix the year
+                    const delim = displayDates[i].includes('-') ? '-' : '/';
+                    displayDates[i] = `${p.day.toString().padStart(2, '0')}${delim}${p.month.toString().padStart(2, '0')}${delim}${y}`;
+                    parsedDates[i] = { day: p.day, month: p.month, year: y };
+                }
+            } else if (Math.abs(p.year - majYear) > 1) {
+                const delim = displayDates[i].includes('-') ? '-' : '/';
+                displayDates[i] = `${p.day.toString().padStart(2, '0')}${delim}${p.month.toString().padStart(2, '0')}${delim}${y}`;
+                parsedDates[i] = { day: p.day, month: p.month, year: y };
+            }
+
+            // After resolving, this becomes an anchor for subsequent dates
+            if (parsedDates[i]) {
+                anchorTimestamps[i] = new Date(parsedDates[i]!.year, parsedDates[i]!.month - 1, parsedDates[i]!.day).getTime();
+            }
+        }
+
+        // Fix years that don't match neighbors
+        for (let i = 0; i < parsedDates.length; i++) {
+            const p = parsedDates[i];
+            if (!p) continue;
+            if (Math.abs(p.year - majYear) <= 1) continue; // close enough
+            const delim = displayDates[i].includes('-') ? '-' : '/';
+            displayDates[i] = `${p.day.toString().padStart(2, '0')}${delim}${p.month.toString().padStart(2, '0')}${delim}${majYear}`;
+            parsedDates[i] = { ...p, year: majYear };
+        }
+
+        // Group results by month using the pre-computed display dates
+        const groupMap = new Map<string, { idx: number; r: typeof processedResults[0]; displayDate: string }[]>();
         const groupOrder: string[] = [];
 
-        for (const r of processedResults) {
-            const dateStr = useAiDate
-                ? (r.ai_date || r.ocr_date || '')
-                : getSyncedValue(r.ocr_date, r.ai_date);
+        for (let i = 0; i < processedResults.length; i++) {
+            const dateStr = displayDates[i];
             let groupKey = 'Unknown';
-            if (dateStr && dateStr !== '—') {
-                const parsed = parseDateForGroup(dateStr);
-                if (parsed) groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
+            let parsed = parsedDates[i];
+            if (dateStr && dateStr !== '—' && parsed && parsed.month >= 1 && parsed.month <= 12) {
+                groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
             }
             if (!groupMap.has(groupKey)) {
                 groupMap.set(groupKey, []);
                 groupOrder.push(groupKey);
             }
-            groupMap.get(groupKey)!.push(r);
+            groupMap.get(groupKey)!.push({ idx: i, r: processedResults[i], displayDate: dateStr });
         }
 
         const groups = groupOrder.map(key => {
-            const rows = groupMap.get(key)!;
-            const dateStr = useAiDate
-                ? (rows[0].ai_date || rows[0].ocr_date || '')
-                : getSyncedValue(rows[0].ocr_date, rows[0].ai_date);
+            const items = groupMap.get(key)!;
+            const firstParsed = parsedDates[items[0].idx];
             let label = 'Unknown Date';
-            if (dateStr && dateStr !== '—') {
-                const parsed = parseDateForGroup(dateStr);
-                if (parsed) label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
+            if (firstParsed && firstParsed.month >= 1 && firstParsed.month <= 12) {
+                label = `${monthNames[firstParsed.month - 1]} ${firstParsed.year}`;
             }
-            return { key, label, rows };
+            return { key, label, items };
         });
 
         // Build flat array of Excel rows with headers and totals
@@ -550,7 +629,8 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             excelRows.push({ '#': group.label, 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
 
             let monthTotal = 0;
-            group.rows.forEach((r, idx) => {
+            group.items.forEach((item, idx) => {
+                const r = item.r;
                 const amount = formatAmountForExcel(r.ai_amount || r.ocr_amount);
                 monthTotal += amount;
 
@@ -558,7 +638,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                     '#': idx + 1,
                     'Bank': getSyncedBank(r.ocr_bank_name, r.ai_bank_name),
                     'Ref ID': getSyncedValue(r.ocr_transaction_id, r.ai_reference_number),
-                    'Date': useAiDate ? (r.ai_date || r.ocr_date || '') : getSyncedValue(r.ocr_date, r.ai_date),
+                    'Date': item.displayDate,
                     'Sender': getSyncedValue(r.ocr_sender, r.ai_from_name),
                     'Receiver': getSyncedValue(r.ocr_receiver, r.ai_to_name),
                     [amountColName]: amount,
@@ -583,7 +663,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         for (const group of groups) {
             const headerRowIdx = currentRowIdx;
             const dataStart = currentRowIdx + 1;
-            const dataEnd = dataStart + group.rows.length - 1;
+            const dataEnd = dataStart + group.items.length - 1;
             const totalRowIdx = dataEnd + 1;
             const separatorRowIdx = totalRowIdx + 1;
 
