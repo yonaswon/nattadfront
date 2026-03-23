@@ -161,6 +161,64 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             currentRef = { d, m, y };
         }
 
+        // Second pass: fill empty dates by interpolating from nearest neighbors
+        for (let i = 0; i < fixed.length; i++) {
+            const r = fixed[i];
+            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
+            if (dateStr && dateStr !== '—') continue; // already has a date
+
+            // Find nearest date above
+            let aboveDate: Date | null = null;
+            let aboveDelim = '/';
+            for (let j = i - 1; j >= 0; j--) {
+                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
+                const p = ds ? parseDate(ds) : null;
+                if (p) {
+                    aboveDate = new Date(p.y, p.m - 1, p.d);
+                    aboveDelim = p.delim;
+                    break;
+                }
+            }
+
+            // Find nearest date below
+            let belowDate: Date | null = null;
+            let belowDelim = '/';
+            for (let j = i + 1; j < fixed.length; j++) {
+                const ds = getSyncedValue(fixed[j].ocr_date, fixed[j].ai_date);
+                const p = ds ? parseDate(ds) : null;
+                if (p) {
+                    belowDate = new Date(p.y, p.m - 1, p.d);
+                    belowDelim = p.delim;
+                    break;
+                }
+            }
+
+            let filledDate: Date | null = null;
+            let usedDelim = '/';
+
+            if (aboveDate && belowDate) {
+                // Midpoint
+                const mid = new Date((aboveDate.getTime() + belowDate.getTime()) / 2);
+                filledDate = mid;
+                usedDelim = aboveDelim;
+            } else if (aboveDate) {
+                filledDate = aboveDate;
+                usedDelim = aboveDelim;
+            } else if (belowDate) {
+                filledDate = belowDate;
+                usedDelim = belowDelim;
+            }
+
+            if (filledDate) {
+                const dd = filledDate.getDate().toString().padStart(2, '0');
+                const mm = (filledDate.getMonth() + 1).toString().padStart(2, '0');
+                const yyyy = filledDate.getFullYear();
+                const filled = `${dd}${usedDelim}${mm}${usedDelim}${yyyy}`;
+                r.ocr_date = filled;
+                r.ai_date = filled;
+            }
+        }
+
         return fixed;
     }, [results, applyDateFix]);
 
@@ -254,15 +312,8 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const formatAmountForExcel = (val: string | number | null | undefined): number => {
             if (val === null || val === undefined) return 0;
             if (typeof val === 'number') return val;
-
-            const strVal = val.toString().trim();
-            // Match optional minus, followed by digits/commas, optionally followed by a decimal point and digits
-            const match = strVal.match(/-?[\d,]+(\.\d+)?/);
-            if (match) {
-                const num = parseFloat(match[0].replace(/,/g, ''));
-                return isNaN(num) ? 0 : num;
-            }
-            return 0;
+            const num = parseFloat(val.toString().replace(/,/g, '').trim());
+            return isNaN(num) ? 0 : num;
         };
 
         const rows = processedResults.map((r, idx) => {
@@ -329,6 +380,135 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         XLSX.utils.book_append_sheet(wb, ws, 'Results');
         const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
         saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_${viewMode}.xlsx`);
+    };
+
+    const exportToExcelMonthly = () => {
+        const formatAmountForExcel = (val: string | number | null | undefined): number => {
+            if (val === null || val === undefined) return 0;
+            if (typeof val === 'number') return val;
+            const strVal = val.toString().trim();
+            const match = strVal.match(/-?[\d,]+(\.\d+)?/);
+            if (match) {
+                const num = parseFloat(match[0].replace(/,/g, ''));
+                return isNaN(num) ? 0 : num;
+            }
+            return 0;
+        };
+
+        const parseDateForGroup = (dateStr: string): { month: number; year: number; dateObj: Date } | null => {
+            const parts = dateStr.split(/[-/]/);
+            if (parts.length < 3) return null;
+            const d = parseInt(parts[0], 10);
+            const m = parseInt(parts[1], 10);
+            let y = parseInt(parts[2], 10);
+            if (isNaN(d) || isNaN(m) || isNaN(y)) return null;
+            if (y < 100) y += 2000;
+            return { month: m, year: y, dateObj: new Date(y, m - 1, d) };
+        };
+
+        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+            'July', 'August', 'September', 'October', 'November', 'December'];
+
+        // Group results by month
+        const groups: { key: string; label: string; rows: typeof processedResults }[] = [];
+        const groupMap = new Map<string, typeof processedResults>();
+        const groupOrder: string[] = [];
+
+        for (const r of processedResults) {
+            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
+            let groupKey = 'Unknown';
+            let groupLabel = 'Unknown Date';
+            if (dateStr && dateStr !== '—') {
+                const parsed = parseDateForGroup(dateStr);
+                if (parsed) {
+                    groupKey = `${parsed.year}-${parsed.month.toString().padStart(2, '0')}`;
+                    groupLabel = `${monthNames[parsed.month - 1]} ${parsed.year}`;
+                }
+            }
+            if (!groupMap.has(groupKey)) {
+                groupMap.set(groupKey, []);
+                groupOrder.push(groupKey);
+            }
+            groupMap.get(groupKey)!.push(r);
+        }
+
+        for (const key of groupOrder) {
+            const rows = groupMap.get(key)!;
+            const first = rows[0];
+            const dateStr = getSyncedValue(first.ocr_date, first.ai_date);
+            let label = 'Unknown Date';
+            if (dateStr && dateStr !== '—') {
+                const parsed = parseDateForGroup(dateStr);
+                if (parsed) label = `${monthNames[parsed.month - 1]} ${parsed.year}`;
+            }
+            groups.push({ key, label, rows });
+        }
+
+        // Build flat array of Excel rows with headers and totals
+        const excelRows: Record<string, any>[] = [];
+        const amountColName = 'Amount';
+
+        for (const group of groups) {
+            // Month header row
+            excelRows.push({ '#': group.label, 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
+
+            let monthTotal = 0;
+            group.rows.forEach((r, idx) => {
+                const amount = r.needs_attention && !takeAiResult
+                    ? formatAmountForExcel(r.ai_amount || r.ocr_amount)
+                    : formatAmountForExcel(r.ai_amount || r.ocr_amount);
+                monthTotal += amount;
+
+                excelRows.push({
+                    '#': idx + 1,
+                    'Bank': getSyncedBank(r.ocr_bank_name, r.ai_bank_name),
+                    'Ref ID': getSyncedValue(r.ocr_transaction_id, r.ai_reference_number),
+                    'Date': getSyncedValue(r.ocr_date, r.ai_date),
+                    'Sender': getSyncedValue(r.ocr_sender, r.ai_from_name),
+                    'Receiver': getSyncedValue(r.ocr_receiver, r.ai_to_name),
+                    [amountColName]: amount,
+                });
+            });
+
+            // Total row
+            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': 'TOTAL', [amountColName]: monthTotal });
+            // Empty separator row
+            excelRows.push({ '#': '', 'Bank': '', 'Ref ID': '', 'Date': '', 'Sender': '', 'Receiver': '', [amountColName]: '' });
+        }
+
+        const ws = XLSX.utils.json_to_sheet(excelRows);
+
+        // Apply number formatting to Amount column and style header/total rows
+        const range = XLSX.utils.decode_range(ws['!ref'] || '');
+        for (let C = range.s.c; C <= range.e.c; ++C) {
+            const headerAddr = XLSX.utils.encode_col(C) + '1';
+            if (!ws[headerAddr]) continue;
+            if (ws[headerAddr].v === amountColName) {
+                for (let R = range.s.r + 1; R <= range.e.r; ++R) {
+                    const cellAddr = XLSX.utils.encode_cell({ r: R, c: C });
+                    if (ws[cellAddr] && typeof ws[cellAddr].v === 'number') {
+                        ws[cellAddr].t = 'n';
+                        ws[cellAddr].z = '#,##0.00';
+                    }
+                }
+            }
+        }
+
+        // Set column widths (wider for Sender and Receiver)
+        ws['!cols'] = [
+            { wch: 6 },   // #
+            { wch: 18 },  // Bank
+            { wch: 20 },  // Ref ID
+            { wch: 14 },  // Date
+            { wch: 30 },  // Sender
+            { wch: 30 },  // Receiver
+            { wch: 16 },  // Amount
+        ];
+
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Monthly Results');
+        const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        saveAs(new Blob([buf], { type: 'application/octet-stream' }), `analysis_results_monthly.xlsx`);
     };
 
     const exportToPdf = () => {
@@ -446,6 +626,14 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                         style={{ background: '#217346', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
                     >
                         📊 Export Excel
+                    </button>
+                    <button
+                        className="btn btn-sm"
+                        onClick={exportToExcelMonthly}
+                        disabled={results.length === 0}
+                        style={{ background: '#0d6efd', color: '#fff', border: 'none', borderRadius: '8px', padding: '6px 14px', fontSize: '13px', fontWeight: 600 }}
+                    >
+                        📊 Export Monthly
                     </button>
                     <button
                         className="btn btn-sm"
