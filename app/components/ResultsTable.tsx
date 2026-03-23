@@ -91,10 +91,13 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const formatDate = (d: number, m: number, y: number, delim: string) =>
             `${d.toString().padStart(2, '0')}${delim}${m.toString().padStart(2, '0')}${delim}${y}`;
 
+        // Get the date based on toggle (strict preference)
+        const getRawDate = (r: typeof fixed[0]) => useAiDate ? (r.ai_date || r.ocr_date || '—') : (r.ocr_date || r.ai_date || '—');
+
         // ── Pass 1: Determine majority year from all dates ──
         const yearCounts: Record<number, number> = {};
         fixed.forEach(r => {
-            const p = parseDate(getSyncedValue(r.ocr_date, r.ai_date));
+            const p = parseDate(getRawDate(r));
             if (p && p.y > 2000 && p.y < 2100) {
                 yearCounts[p.y] = (yearCounts[p.y] || 0) + 1;
             }
@@ -113,7 +116,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
 
         // First resolve UNAMBIGUOUS dates (where one part > 12, so we know which is day vs month)
         for (let i = 0; i < fixed.length; i++) {
-            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+            const dateStr = getRawDate(fixed[i]);
             const p = parseDate(dateStr);
             if (!p) continue;
 
@@ -156,7 +159,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         const resolveAmbiguous = (idx: number) => {
             if (resolved[idx]) return; // already resolved
 
-            const dateStr = getSyncedValue(fixed[idx].ocr_date, fixed[idx].ai_date);
+            const dateStr = getRawDate(fixed[idx]);
             const p = parseDate(dateStr);
             if (!p) return;
 
@@ -275,7 +278,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             const res = resolved[i];
             if (!res) continue;
 
-            const dateStr = getSyncedValue(r.ocr_date, r.ai_date);
+            const dateStr = getRawDate(r);
             const p = parseDate(dateStr);
             if (!p) continue;
 
@@ -283,14 +286,19 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             const rawY = p.y > 100 ? p.y : p.y + 2000;
             if (p.d !== res.day || p.m !== res.month || rawY !== res.year) {
                 const newStr = formatDate(res.day, res.month, res.year, res.delim);
-                if (r.ai_date) r.ai_date = newStr;
-                if (r.ocr_date) r.ocr_date = newStr;
+                if (useAiDate) {
+                    if (r.ai_date) r.ai_date = newStr;
+                    else if (r.ocr_date) r.ocr_date = newStr;
+                } else {
+                    if (r.ocr_date) r.ocr_date = newStr;
+                    else if (r.ai_date) r.ai_date = newStr;
+                }
             }
         }
 
         // ── Pass 6: Fill empty dates from nearest neighbors ──
         for (let i = 0; i < fixed.length; i++) {
-            const dateStr = getSyncedValue(fixed[i].ocr_date, fixed[i].ai_date);
+            const dateStr = getRawDate(fixed[i]);
             if (dateStr && dateStr !== '—') continue;
 
             let aboveRes: Resolved | null = null;
@@ -320,7 +328,7 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
         }
 
         return fixed;
-    }, [results, applyDateFix]);
+    }, [results, applyDateFix, useAiDate]);
 
     const handleRedoOcr = async (result: TransactionResult) => {
         const key = `ocr-${result.id}`;
