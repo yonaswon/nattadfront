@@ -127,11 +127,11 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             if (d > 12 && m <= 12) {
                 // d must be the day (>12 can't be month) → DD/MM format, correct as-is
                 const ts = toTimestamp(y, m, d);
-                if (ts !== null) resolved[i] = { day: d, month: m, year: y, ts, delim };
+                if (ts !== null && ts <= Date.now() + 86400000) resolved[i] = { day: d, month: m, year: y, ts, delim };
             } else if (m > 12 && d <= 12) {
                 // m position holds a value >12, so it must actually be the day → swap
                 const ts = toTimestamp(y, d, m);
-                if (ts !== null) resolved[i] = { day: m, month: d, year: y, ts, delim };
+                if (ts !== null && ts <= Date.now() + 86400000) resolved[i] = { day: m, month: d, year: y, ts, delim };
             }
             // If both <= 12, it's ambiguous — skip for now
         }
@@ -186,6 +186,11 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             if (ts1 !== null && ts2 !== null && allAnchors.length > 0) {
                 let score1 = 0, score2 = 0;
                 const PENALTY = 365 * 24 * 60 * 60 * 1000; // 1 year penalty for breaking sort order
+                const FUTURE_PENALTY = PENALTY * 10;
+                const nowTs = Date.now() + 86400000;
+
+                if (ts1 > nowTs) score1 += FUTURE_PENALTY;
+                if (ts2 > nowTs) score2 += FUTURE_PENALTY;
 
                 if (anchorsAbove.length > 0) {
                     const nearestAbove = anchorsAbove[0];
@@ -219,12 +224,12 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
                 } else {
                     resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
                 }
-            } else if (ts1 !== null && d === m) {
+            } else if (ts1 !== null && d === m && ts1 <= Date.now() + 86400000) {
                 // Same value (e.g. 03/03), no swap needed
                 resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
-            } else if (ts1 !== null) {
+            } else if (ts1 !== null && ts1 <= Date.now() + 86400000) {
                 resolved[idx] = { day: d, month: m, year: y, ts: ts1, delim };
-            } else if (ts2 !== null) {
+            } else if (ts2 !== null && ts2 <= Date.now() + 86400000) {
                 resolved[idx] = { day: m, month: d, year: y, ts: ts2, delim };
             }
         };
