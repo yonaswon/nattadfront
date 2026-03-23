@@ -232,6 +232,44 @@ export default function ResultsTable({ results, onViewImage, onEditResult, onRes
             }
         }
 
+        // ── Pass 4.5: Fix years that don't match their chronological neighborhood ──
+        for (let i = 0; i < resolved.length; i++) {
+            const res = resolved[i];
+            if (!res) continue;
+
+            // Collect years from up to 5 resolved neighbors above and below
+            const neighborYears: number[] = [];
+            let count = 0;
+            for (let j = i - 1; j >= 0 && count < 5; j--) {
+                if (resolved[j]) { neighborYears.push(resolved[j]!.year); count++; }
+            }
+            count = 0;
+            for (let j = i + 1; j < resolved.length && count < 5; j++) {
+                if (resolved[j]) { neighborYears.push(resolved[j]!.year); count++; }
+            }
+
+            if (neighborYears.length < 2) continue; // not enough context
+
+            // Find majority year among neighbors
+            const yCounts: Record<number, number> = {};
+            for (const ny of neighborYears) {
+                yCounts[ny] = (yCounts[ny] || 0) + 1;
+            }
+            let neighborMajorYear = res.year;
+            let neighborMaxCount = 0;
+            for (const [yr, cnt] of Object.entries(yCounts)) {
+                if (cnt > neighborMaxCount) { neighborMaxCount = cnt; neighborMajorYear = parseInt(yr, 10); }
+            }
+
+            // If this date's year differs from the neighbor majority and most neighbors agree
+            if (res.year !== neighborMajorYear && neighborMaxCount >= Math.ceil(neighborYears.length * 0.6)) {
+                const newTs = toTimestamp(neighborMajorYear, res.month, res.day);
+                if (newTs !== null) {
+                    resolved[i] = { ...res, year: neighborMajorYear, ts: newTs };
+                }
+            }
+        }
+
         // ── Pass 5: Apply resolved dates back to the data ──
         for (let i = 0; i < fixed.length; i++) {
             const r = fixed[i];
